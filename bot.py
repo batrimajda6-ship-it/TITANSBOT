@@ -838,6 +838,33 @@ async def cmd_admin(interaction: discord.Interaction):
     await interaction.response.send_message("Select a lobby:", view=AdminLobbyView(dict(lobbies)), ephemeral=True)
 
 
+@bot.tree.command(name="backup", description="Backup scores to a file")
+async def cmd_backup(interaction: discord.Interaction):
+    if interaction.user.id != ADMIN_ID:
+        return await interaction.response.send_message("Only admin.", ephemeral=True)
+    with LOCK:
+        try:
+            with open(DATA_FILE) as f:
+                raw = f.read()
+        except:
+            return await interaction.response.send_message("No scores file found.", ephemeral=True)
+    await interaction.response.send_message(file=discord.File(BACKUP_FILE if os.path.exists(BACKUP_FILE) else DATA_FILE, filename="scores_backup.json"), ephemeral=True)
+
+@bot.tree.command(name="restore", description="Restore scores from a backup file")
+async def cmd_restore(interaction: discord.Interaction, attachment: discord.Attachment):
+    if interaction.user.id != ADMIN_ID:
+        return await interaction.response.send_message("Only admin.", ephemeral=True)
+    if not attachment.filename.endswith(".json"):
+        return await interaction.response.send_message("Must be a .json file.", ephemeral=True)
+    raw = await attachment.read()
+    try:
+        data = json.loads(raw)
+    except:
+        return await interaction.response.send_message("Invalid JSON.", ephemeral=True)
+    save_scores(data)
+    await interaction.response.send_message(f"✅ Restored scores for {sum(len(g) for g in data.values())} players!", ephemeral=True)
+
+
 if __name__ == "__main__":
     import asyncio, random
     async def start():
