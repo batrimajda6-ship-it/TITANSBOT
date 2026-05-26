@@ -46,20 +46,30 @@ async def recalculate_all_ranks(guild):
         members = [m for m in guild.members if any(ROLE_NAME in r.name for r in m.roles)]
         if not members:
             return
+        bot_member = guild.get_member(bot.user.id)
         scored = [(m, int(g.get(str(m.id), {}).get("points", 0))) for m in members if str(m.id) in g]
         zero_pts = [(m, 0) for m in members if str(m.id) not in g]
         all_players = sorted(scored + zero_pts, key=lambda x: -x[1])
         ranked = [(m, p, i+1) for i, (m, p) in enumerate(all_players)]
+        changed = 0
         for i, (m, p, pos) in enumerate(ranked):
+            if bot_member and m.top_role >= bot_member.top_role:
+                continue
             prefix = f"Rank {pos} | "
             base = m.display_name
             if " | " in base:
                 base = base.rsplit(" | ", 1)[-1]
+            new_nick = f"{prefix}{base}"
+            if m.display_name == new_nick:
+                continue
             try:
-                await m.edit(nick=f"{prefix}{base}")
-                await asyncio.sleep(0.05)
+                await m.edit(nick=new_nick)
+                await asyncio.sleep(0.15)
+                changed += 1
             except:
                 pass
+        if changed:
+            print(f"[RANKS] Updated {changed}/{len(ranked)} nicknames in {guild.name}")
     except Exception as e:
         print(f"[RANK RECALC ERROR] {e}")
 
