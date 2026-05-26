@@ -659,11 +659,27 @@ async def on_raw_reaction_add(payload):
     role = guild.get_role(1508212570404687932)
     if not role:
         return
+    bot_member = guild.get_member(bot.user.id)
+    if bot_member and role.position >= bot_member.top_role.position:
+        try:
+            await member.send("I can't give you the rank role — my role is too low in the server settings. An admin needs to move my role **above** the rank role.")
+        except:
+            pass
+        return
     try:
         await member.add_roles(role, reason="Reacted for rank")
-        asyncio.create_task(recalculate_all_ranks(guild))
     except Exception as e:
-        print(f"[RANK ERROR] {e}")
+        try:
+            await member.send(f"Couldn't add rank role: {e}. Tell an admin.")
+        except:
+            pass
+        return
+    try:
+        await member.send("✅ You got the rank role! Your nickname will update shortly.")
+    except:
+        pass
+    await asyncio.sleep(2)
+    asyncio.create_task(recalculate_all_ranks(guild))
 
 @bot.event
 async def on_raw_reaction_remove(payload):
@@ -680,9 +696,10 @@ async def on_raw_reaction_remove(payload):
         return
     try:
         await member.remove_roles(role, reason="Unreacted rank")
-        asyncio.create_task(recalculate_all_ranks(guild))
-    except Exception as e:
-        print(f"[RANK ERROR] {e}")
+    except:
+        pass
+    await asyncio.sleep(2)
+    asyncio.create_task(recalculate_all_ranks(guild))
 
 
 @bot.command(name="win")
