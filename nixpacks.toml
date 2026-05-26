@@ -1,0 +1,5 @@
+[phases.setup]
+nixPkgs = ["libsodium", "pkg-config"]
+
+[phases.install]
+cmds = ["SODIUM_INSTALL=system pip install --force-reinstall PyNaCl==1.5.0"]

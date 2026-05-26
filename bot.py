@@ -1,0 +1,829 @@
+import discord
+from discord.ext import commands
+from discord.ui import View, Button
+import datetime, os, asyncio, json, threading
+
+TOKEN = os.getenv("DISCORD_TOKEN", "YOUR_BOT_TOKEN_HERE")
+ADMIN_ID = int(os.getenv("ADMIN_ID", "1494693018975076392"))
+DATA_DIR = os.getenv("VOLUME_PATH", ".")
+DATA_FILE = os.path.join(DATA_DIR, "scores.json")
+LOCK = threading.Lock()
+BACKUP_FILE = DATA_FILE + ".bak"
+
+
+def load_scores():
+    with LOCK:
+        try:
+            with open(DATA_FILE) as f:
+                return json.load(f)
+        except FileNotFoundError:
+            return {}
+        except:
+            try:
+                with open(BACKUP_FILE) as f:
+                    return json.load(f)
+            except:
+                return {}
+
+def save_scores(data):
+    with LOCK:
+        try:
+            with open(BACKUP_FILE, "w") as f:
+                json.dump(data, f, indent=2)
+        except:
+            pass
+        with open(DATA_FILE, "w") as f:
+            json.dump(data, f, indent=2)
+
+
+ROLE_NAME = "rank"
+rank_message_id = 1508197095385858120
+
+async def recalculate_all_ranks(guild):
+    try:
+        data = load_scores()
+        g = data.get(str(guild.id), {})
+        members = [m for m in guild.members if any(ROLE_NAME in r.name for r in m.roles)]
+        if not members:
+            return
+        scored = [(m, int(g.get(str(m.id), {}).get("points", 0))) for m in members if str(m.id) in g]
+        zero_pts = [(m, 0) for m in members if str(m.id) not in g]
+        all_players = sorted(scored + zero_pts, key=lambda x: -x[1])
+        ranked = [(m, p, i+1) for i, (m, p) in enumerate(all_players)]
+        for i, (m, p, pos) in enumerate(ranked):
+            prefix = f"Rank {pos} | "
+            base = m.display_name
+            if " | " in base:
+                base = base.rsplit(" | ", 1)[-1]
+            try:
+                await m.edit(nick=f"{prefix}{base}")
+                await asyncio.sleep(0.05)
+            except:
+                pass
+    except Exception as e:
+        print(f"[RANK RECALC ERROR] {e}")
+
+def get_user_data(guild_id, user_id, username):
+    data = load_scores()
+    g = data.setdefault(str(guild_id), {})
+    u = g.setdefault(str(user_id), {"name": username, "points": 0, "wins": 0, "losses": 0, "mvp_wins": 0, "mvp_losses": 0})
+    u["name"] = username
+    return data, u
+
+
+# ─── LOBBY ──────────────────────────────────────────────
+
+class Lobby:
+    def __init__(self, lid, mode, creator, channel):
+        self.id = lid
+        self.mode = mode
+        self.creator = creator
+        self.channel = channel
+        self.team1: list[discord.Member] = []
+        self.team2: list[discord.Member] = []
+        self.max_per_team = int(mode[0])
+        self.active = True
+        self.started = False
+        self.message_id = None
+        self.category_id = None
+        self.t1_vc_id = None
+        self.t2_vc_id = None
+        self.text_id = None
+        self.original_vcs: dict[int, int] = {}
+        self.match_id = ""
+        self.password = ""
+        self.key = ""
+        self.cleanup_task = None
+
+    @property
+    def total_needed(self): return self.max_per_team * 2
+    @property
+    def total(self): return len(self.team1) + len(self.team2)
+    @property
+    def is_full(self): return len(self.team1) >= self.max_per_team and len(self.team2) >= self.max_per_team
+
+    def in_lobby(self, uid):
+        return uid in [m.id for m in self.team1] or uid in [m.id for m in self.team2]
+
+    def remove(self, uid):
+        self.team1 = [m for m in self.team1 if m.id != uid]
+        self.team2 = [m for m in self.team2 if m.id != uid]
+
+
+# ─── EMBED HELPERS ──────────────────────────────────────
+
+def progress_bar(filled, total, size=10):
+    f = int((filled / total) * size) if total else 0
+    return "\U0001f7e6" * f + "\u2b1c" * (size - f)
+
+
+def build_embed(lobby):
+    crown = "\U0001f451"
+    scores = load_scores()
+    g = scores.get(str(lobby.channel.guild.id) if hasattr(lobby.channel, 'guild') else "", {})
+    def pts(m):
+        p = g.get(str(m.id), {}).get("points", 0)
+        return f"`{p}pts`"
+    t1 = "\n".join(f"{crown if m.id == lobby.creator.id else ''}{m.mention} {pts(m)}" for m in lobby.team1) or "\u2514\u2500\u2500 *Empty*"
+    t2 = "\n".join(f"{crown if m.id == lobby.creator.id else ''}{m.mention} {pts(m)}" for m in lobby.team2) or "\u2514\u2500\u2500 *Empty*"
+    bar = progress_bar(lobby.total, lobby.total_needed)
+    status = "\U0001f7e2 Waiting..." if not lobby.is_full else "\u2705 Ready!"
+    clr = 0x5865F2 if not lobby.is_full else 0x3BA55C
+    embed = discord.Embed(title=f"\u2694\ufe0f {lobby.mode.upper()} LOBBY", color=clr, timestamp=datetime.datetime.now())
+    embed.set_author(name=lobby.creator.display_name, icon_url=lobby.creator.display_avatar.url)
+    embed.add_field(name=f"\U0001f535 **TEAM 1** ({len(lobby.team1)}/{lobby.max_per_team})", value=t1, inline=True)
+    embed.add_field(name=f"\U0001f534 **TEAM 2** ({len(lobby.team2)}/{lobby.max_per_team})", value=t2, inline=True)
+    embed.add_field(name="\u200b", value="\u200b", inline=True)
+    embed.add_field(name="\U0001f4ca Players", value=f"{bar} `{lobby.total}/{lobby.total_needed}`", inline=False)
+    embed.add_field(name="Status", value=status, inline=False)
+    return embed
+
+
+async def cleanup_game(lobby, guild):
+    for m in lobby.team1 + lobby.team2:
+        orig_id = lobby.original_vcs.get(m.id)
+        target = guild.get_channel(orig_id) if orig_id else None
+        try: await m.move_to(target)
+        except: pass
+    await asyncio.sleep(1)
+    for cid in [lobby.text_id, lobby.t1_vc_id, lobby.t2_vc_id, lobby.category_id]:
+        try:
+            ch = guild.get_channel(cid)
+            if ch: await ch.delete()
+        except: pass
+    try:
+        msg = await lobby.channel.fetch_message(lobby.message_id)
+        await msg.delete()
+    except: pass
+    lobbies.pop(lobby.id, None)
+
+
+# ─── MVP SELECT VIEW ────────────────────────────────────
+
+class MvpView(View):
+    def __init__(self, team_members, label):
+        super().__init__(timeout=120)
+        self.mvp = None
+        self.team_members = team_members
+        for m in team_members:
+            b = Button(label=m.display_name, style=discord.ButtonStyle.primary)
+            b.callback = self._make_cb(m)
+            self.add_item(b)
+
+    def _make_cb(self, member):
+        async def cb(i: discord.Interaction):
+            self.mvp = member
+            for child in self.children:
+                child.disabled = True
+            await i.response.edit_message(content=f"MVP: {member.mention}", view=self)
+            self.stop()
+        return cb
+
+
+# ─── KEY MODAL ───────────────────────────────────────────
+
+class KeyModal(discord.ui.Modal, title="Enter Game Key"):
+    key_input = discord.ui.TextInput(label="Key", placeholder="Enter the game key to join", min_length=1, max_length=20)
+
+    def __init__(self, lobby, team):
+        super().__init__()
+        self.lobby = lobby
+        self.team = team
+
+    async def on_submit(self, interaction: discord.Interaction):
+        l = self.lobby
+        if not l.active:
+            return await interaction.response.send_message("This lobby is closed.", ephemeral=True)
+        if l.in_lobby(interaction.user.id):
+            return await interaction.response.send_message("You're already in this lobby!", ephemeral=True)
+        team_members = l.team1 if self.team == 1 else l.team2
+        if len(team_members) >= l.max_per_team:
+            return await interaction.response.send_message("That team is full!", ephemeral=True)
+        if self.key_input.value != l.key:
+            return await interaction.response.send_message("Wrong key! You cannot join this lobby.", ephemeral=True)
+        team_members.append(interaction.user)
+        await interaction.response.defer()
+        try:
+            msg = await l.channel.fetch_message(l.message_id)
+            await msg.edit(embed=build_embed(l), view=LobbyView(l))
+        except:
+            pass
+        if l.is_full:
+            await _start_cleanup_timer(l)
+        try: await interaction.user.send(f"Joined Team {self.team} \u2022 {l.mode.upper()} lobby")
+        except: pass
+
+
+async def _cancel_cleanup(lobby):
+    if lobby.cleanup_task:
+        lobby.cleanup_task.cancel()
+        lobby.cleanup_task = None
+
+async def _start_cleanup_timer(lobby):
+    await _cancel_cleanup(lobby)
+    async def timer():
+        await asyncio.sleep(300)
+        if lobby.active and not lobby.started:
+            lobby.active = False
+            try:
+                msg = await lobby.channel.fetch_message(lobby.message_id)
+                embed = discord.Embed(title="\u23f0 Lobby Cancelled", description="Auto-cancelled due to inactivity (5 min)", color=0xed4245)
+                await msg.edit(embed=embed, view=None)
+            except:
+                pass
+            lobbies.pop(lobby.id, None)
+    lobby.cleanup_task = asyncio.create_task(timer())
+
+
+# ─── IN-LOBBY VIEW ──────────────────────────────────────
+
+class LobbyView(View):
+    def __init__(self, lobby):
+        super().__init__(timeout=None)
+        self.lobby = lobby
+        self._build()
+
+    def _build(self):
+        self.clear_items()
+        l, a = self.lobby, self.lobby.active
+        b1 = Button(label=f"Team 1 ({len(l.team1)}/{l.max_per_team})", style=discord.ButtonStyle.blurple, emoji="\U0001f535",
+                    disabled=not a or len(l.team1) >= l.max_per_team, row=0)
+        b1.callback = self.join_t1; self.add_item(b1)
+        b2 = Button(label=f"Team 2 ({len(l.team2)}/{l.max_per_team})", style=discord.ButtonStyle.red, emoji="\U0001f534",
+                    disabled=not a or len(l.team2) >= l.max_per_team, row=0)
+        b2.callback = self.join_t2; self.add_item(b2)
+        b3 = Button(label="Leave", style=discord.ButtonStyle.grey, emoji="\U0001f6aa", disabled=not a, row=1)
+        b3.callback = self.leave; self.add_item(b3)
+        b4 = Button(label="Start Game", style=discord.ButtonStyle.green, emoji="\u2705", disabled=not a or not l.is_full, row=1)
+        b4.callback = self.start; self.add_item(b4)
+        b5 = Button(label="Cancel", style=discord.ButtonStyle.red, emoji="\u26d4", disabled=not a, row=1)
+        b5.callback = self.cancel; self.add_item(b5)
+
+    async def _refresh(self, i):
+        await i.edit_original_response(embed=build_embed(self.lobby), view=LobbyView(self.lobby))
+
+    async def _do_join(self, i, team):
+        l = self.lobby
+        if not l.active: return await i.response.send_message("Closed.", ephemeral=True)
+        if l.in_lobby(i.user.id): return await i.response.send_message("Already in!", ephemeral=True)
+        team_members = l.team1 if team == 1 else l.team2
+        if len(team_members) >= l.max_per_team: return await i.response.send_message("Full!", ephemeral=True)
+        if l.key:
+            return await i.response.send_modal(KeyModal(l, team))
+        team_members.append(i.user)
+        await i.response.defer(); await self._refresh(i)
+        if l.is_full:
+            await _start_cleanup_timer(l)
+        try: await i.user.send(f"Joined Team {team} \u2022 {l.mode.upper()} lobby")
+        except: pass
+
+    async def join_t1(self, i): await self._do_join(i, 1)
+    async def join_t2(self, i): await self._do_join(i, 2)
+
+    async def leave(self, i):
+        l = self.lobby
+        if not l.active: return await i.response.send_message("Closed.", ephemeral=True)
+        if not l.in_lobby(i.user.id): return await i.response.send_message("Not in.", ephemeral=True)
+        l.remove(i.user.id)
+        await _cancel_cleanup(l)
+        await i.response.defer(); await self._refresh(i)
+        try: await i.user.send(f"Left {l.mode.upper()} lobby")
+        except: pass
+
+    async def start(self, i):
+        l = self.lobby
+        if i.user.id != l.creator.id: return await i.response.send_message("Only creator.", ephemeral=True)
+        if not l.is_full: return await i.response.send_message("Not enough!", ephemeral=True)
+        if not l.active or l.started: return await i.response.send_message("Already started!", ephemeral=True)
+        await _cancel_cleanup(l)
+        guild = i.guild
+        for m in l.team1 + l.team2:
+            if m.voice and m.voice.channel:
+                l.original_vcs[m.id] = m.voice.channel.id
+        await i.response.defer()
+        try:
+            overwrites = {guild.default_role: discord.PermissionOverwrite(connect=False)}
+            category = await guild.create_category(f"{l.creator.display_name}'s {l.mode}", overwrites=overwrites)
+            l.category_id = category.id
+            t1_ow = {guild.default_role: discord.PermissionOverwrite(connect=False, view_channel=True)}
+            for m in l.team1: t1_ow[m] = discord.PermissionOverwrite(connect=True, view_channel=True)
+            t2_ow = {guild.default_role: discord.PermissionOverwrite(connect=False, view_channel=True)}
+            for m in l.team2: t2_ow[m] = discord.PermissionOverwrite(connect=True, view_channel=True)
+            vc1 = await guild.create_voice_channel(f"Team 1 ({l.mode})", category=category, overwrites=t1_ow)
+            vc2 = await guild.create_voice_channel(f"Team 2 ({l.mode})", category=category, overwrites=t2_ow)
+            l.t1_vc_id = vc1.id; l.t2_vc_id = vc2.id
+            text = await guild.create_text_channel(f"{l.mode.lower()}-lobby", category=category)
+            l.text_id = text.id
+            for m in l.team1:
+                try: await m.move_to(vc1)
+                except: pass
+            for m in l.team2:
+                try: await m.move_to(vc2)
+                except: pass
+            await text.send(f"## \U0001f3ae Match Live!\n\U0001f194 **Match ID:** `{l.match_id}` \U0001f511 **Password:** `{l.password}`" + (f" \U0001f510 **Key:** `{l.key}`" if l.key else "") + "\n\nClick a team button below when the match ends:", view=PostGameView(l.id))
+        except Exception as e:
+            for cid in [l.t1_vc_id, l.t2_vc_id, l.text_id, l.category_id]:
+                try:
+                    ch = guild.get_channel(cid)
+                    if ch: await ch.delete()
+                except:
+                    pass
+            await i.edit_original_response(embed=discord.Embed(title="Failed", description=str(e), color=discord.Color.red()), view=None)
+            l.active = True; return
+        l.active = False; l.started = True
+        embed = discord.Embed(title=f"\U0001f3ae {l.mode.upper()} — LIVE", color=0x5865F2)
+        embed.add_field(name=f"\U0001f535 Team 1 ({len(l.team1)})", value="\n".join(m.mention for m in l.team1), inline=True)
+        embed.add_field(name=f"\U0001f534 Team 2 ({len(l.team2)})", value="\n".join(m.mention for m in l.team2), inline=True)
+        embed.add_field(name="\u200b", value="\u200b", inline=True)
+        embed.set_footer(text="\u23f0 Game in progress \u2022 Use buttons below to end")
+        await i.edit_original_response(embed=embed, view=InGameView(l.id))
+        for m in l.team1 + l.team2:
+            try: await m.send(f"{l.mode.upper()} started!")
+            except: pass
+
+    async def cancel(self, i):
+        l = self.lobby
+        if i.user.id != l.creator.id: return await i.response.send_message("Only creator.", ephemeral=True)
+        if not l.active: return await i.response.send_message("Closed.", ephemeral=True)
+        await _cancel_cleanup(l)
+        l.active = False
+        await i.response.send_message("Cancelled.", ephemeral=True)
+        try: await i.message.delete()
+        except: pass
+        lobbies.pop(l.id, None)
+
+
+# ─── IN-GAME VIEW ───────────────────────────────────────
+
+class InGameView(View):
+    def __init__(self, lobby_id):
+        super().__init__(timeout=None)
+        self.lobby_id = lobby_id
+
+    @discord.ui.button(label="End Game", style=discord.ButtonStyle.red, emoji="\u26d4")
+    async def end_game(self, i: discord.Interaction, b: Button):
+        lobby = lobbies.get(self.lobby_id)
+        if not lobby: return await i.response.send_message("Not found.", ephemeral=True)
+        if i.user.id != lobby.creator.id: return await i.response.send_message("Only creator.", ephemeral=True)
+        await i.response.defer()
+        await i.edit_original_response(embed=discord.Embed(title="Game Ended - Cleaning up...", color=discord.Color.red()), view=None)
+        await cleanup_game(lobby, i.guild)
+
+
+# ─── POST-GAME VIEW ─────────────────────────────────────
+
+class PostGameView(View):
+    def __init__(self, lobby_id):
+        super().__init__(timeout=None)
+        self.lobby_id = lobby_id
+
+    @discord.ui.button(label="Team 1 Wins", style=discord.ButtonStyle.blurple, emoji="\U0001f3c6")
+    async def t1_wins(self, i: discord.Interaction, b: Button):
+        await self._pick_mvp(i, 1)
+
+    @discord.ui.button(label="Team 2 Wins", style=discord.ButtonStyle.red, emoji="\U0001f3c6")
+    async def t2_wins(self, i: discord.Interaction, b: Button):
+        await self._pick_mvp(i, 2)
+
+    async def _restore_match_view(self, i, lobby):
+        embed = discord.Embed(title=f"\U0001f3ae {lobby.mode.upper()} — LIVE", color=0x5865F2)
+        embed.add_field(name=f"\U0001f535 Team 1 ({len(lobby.team1)})", value="\n".join(m.mention for m in lobby.team1), inline=True)
+        embed.add_field(name=f"\U0001f534 Team 2 ({len(lobby.team2)})", value="\n".join(m.mention for m in lobby.team2), inline=True)
+        embed.set_footer(text="\u23f0 Game in progress")
+        try: await i.edit_original_response(content=None, embed=embed, view=PostGameView(self.lobby_id))
+        except: pass
+
+    async def _pick_mvp(self, i: discord.Interaction, winning_team: int):
+        lobby = lobbies.get(self.lobby_id)
+        if not lobby: return await i.response.send_message("Not found.", ephemeral=True)
+        if i.user.id != lobby.creator.id:
+            return await i.response.send_message("Only the creator can finish.", ephemeral=True)
+        if not lobby.started: return await i.response.send_message("Not started.", ephemeral=True)
+
+        win_team = lobby.team1 if winning_team == 1 else lobby.team2
+        lose_team = lobby.team2 if winning_team == 1 else lobby.team1
+        win_label = "Team 1" if winning_team == 1 else "Team 2"
+        lose_label = "Team 2" if winning_team == 1 else "Team 1"
+        we = "\U0001f535" if winning_team == 1 else "\U0001f534"
+        le = "\U0001f534" if winning_team == 1 else "\U0001f535"
+
+        await i.response.defer()
+        await i.edit_original_response(content="Selecting MVPs...", embed=None, view=None)
+
+        v1 = MvpView(win_team, f"{we} {win_label}")
+        await i.followup.send(f"{we} Pick MVP from **{win_label}** (winners):", view=v1, ephemeral=True)
+        await v1.wait()
+        if not v1.mvp:
+            await self._restore_match_view(i, lobby)
+            return await i.followup.send("Timed out.", ephemeral=True)
+        win_mvp = v1.mvp
+
+        v2 = MvpView(lose_team, f"{le} {lose_label}")
+        await i.followup.send(f"{le} Pick MVP from **{lose_label}** (losers):", view=v2, ephemeral=True)
+        await v2.wait()
+        if not v2.mvp:
+            await self._restore_match_view(i, lobby)
+            return await i.followup.send("Timed out.", ephemeral=True)
+        lose_mvp = v2.mvp
+
+        gid, wp, lp = str(i.guild_id), [m.id for m in win_team], [m.id for m in lose_team]
+        tracked = [m for m in lobby.team1 + lobby.team2 if any(ROLE_NAME in r.name for r in m.roles)]
+        data = load_scores()
+        g = data.setdefault(gid, {})
+        for m in tracked:
+            u = g.setdefault(str(m.id), {"name": m.name, "points": 0, "wins": 0, "losses": 0, "mvp_wins": 0, "mvp_losses": 0})
+            u["name"] = m.name
+            if m.id in wp: u["points"] += 5; u["wins"] += 1
+            else: u["losses"] += 1
+        for mid, pts, key in [(win_mvp.id, 5, "mvp_wins"), (lose_mvp.id, 2, "mvp_losses")]:
+            u = g.setdefault(str(mid), {"name": win_mvp.name if mid == win_mvp.id else lose_mvp.name, "points": 0, "wins": 0, "losses": 0, "mvp_wins": 0, "mvp_losses": 0})
+            u["points"] += pts; u[key] += 1
+        save_scores(data)
+        asyncio.create_task(recalculate_all_ranks(i.guild))
+
+        embed = discord.Embed(title=f"\U0001f3c6 {win_label} WINS!", color=0xFFD700)
+        embed.add_field(name=f"{we} {win_label} (+5 each)", value="\n".join(f"{m.mention} \u2705" for m in win_team), inline=True)
+        embed.add_field(name=f"{le} {lose_label}", value="\n".join(f"{m.mention}" for m in lose_team), inline=True)
+        embed.add_field(name="\u200b", value="\u200b", inline=True)
+        embed.add_field(name=f"\u2b50 {win_label} MVP (+5 bonus)", value=win_mvp.mention, inline=True)
+        embed.add_field(name=f"\U0001f4aa {lose_label} MVP (+2)", value=lose_mvp.mention, inline=True)
+        embed.add_field(name="\u200b", value="\u200b", inline=True)
+        embed.set_footer(text="\u2705 Points updated!")
+        await i.edit_original_response(content=None, embed=embed, view=None)
+        await i.followup.send(embed=embed)
+        try:
+            orig_msg = await lobby.channel.fetch_message(lobby.message_id)
+            done = discord.Embed(title=f"\u2705 Game Over \u2022 {lobby.mode}", color=0x808080)
+            await orig_msg.edit(embed=done, view=None)
+        except:
+            pass
+        await asyncio.sleep(2)
+        await i.followup.send("Choose next action:", view=PostGameEndView(lobby.id, i.guild), ephemeral=True)
+
+
+class PostGameEndView(View):
+    def __init__(self, lobby_id, guild):
+        super().__init__(timeout=None)
+        self.lobby_id = lobby_id
+        self.guild = guild
+
+    @discord.ui.button(label="\U0001f504 Rematch", style=discord.ButtonStyle.green)
+    async def rematch(self, i: discord.Interaction, b: Button):
+        lobby = lobbies.get(self.lobby_id)
+        if not lobby: return await i.response.send_message("Lobby gone.", ephemeral=True)
+        if i.user.id != lobby.creator.id: return await i.response.send_message("Only creator.", ephemeral=True)
+        await i.response.defer(ephemeral=True)
+        new_lid = f"{lobby.creator.id}_{datetime.datetime.now().timestamp()}"
+        new_lobby = Lobby(new_lid, lobby.mode, lobby.creator, lobby.channel)
+        new_lobby.match_id = lobby.match_id
+        new_lobby.password = lobby.password
+        new_lobby.key = lobby.key
+        for m in lobby.team1: new_lobby.team1.append(m)
+        for m in lobby.team2: new_lobby.team2.append(m)
+        lobbies[new_lid] = new_lobby
+        msg = await lobby.channel.send(embed=build_embed(new_lobby), view=LobbyView(new_lobby))
+        new_lobby.message_id = msg.id
+        await i.followup.send(f"Rematch created! {msg.jump_url}", ephemeral=True)
+
+    @discord.ui.button(label="\u26d4 End Game", style=discord.ButtonStyle.red)
+    async def end(self, i: discord.Interaction, b: Button):
+        lobby = lobbies.get(self.lobby_id)
+        if not lobby: return await i.response.send_message("Lobby gone.", ephemeral=True)
+        if i.user.id != lobby.creator.id: return await i.response.send_message("Only creator.", ephemeral=True)
+        await i.response.defer(ephemeral=True)
+        await cleanup_game(lobby, self.guild)
+        await i.followup.send("Game ended.", ephemeral=True)
+
+
+# ─── BOT SETUP ──────────────────────────────────────────
+
+intents = discord.Intents.default()
+intents.message_content = True
+intents.members = True
+intents.voice_states = True
+bot = commands.Bot(command_prefix="!", intents=intents)
+lobbies: dict[str, Lobby] = {}
+
+
+# ─── RANK / LEADERBOARD ─────────────────────────────────
+
+@bot.tree.command(name="rank", description="Show your rank and points")
+async def cmd_rank(interaction: discord.Interaction, member: discord.Member = None):
+    member = member or interaction.user
+    if not any(ROLE_NAME in r.name for r in member.roles):
+        return await interaction.response.send_message("This member doesn't have the rank role.", ephemeral=True)
+    data, u = get_user_data(interaction.guild_id, member.id, member.name)
+    g = data.get(str(interaction.guild_id), {})
+    sorted_ids = sorted(g, key=lambda uid: g[uid]["points"], reverse=True)
+    rank_pos = next((i+1 for i, uid in enumerate(sorted_ids) if uid == str(member.id)), "?")
+    embed = discord.Embed(title=f"Rank #{rank_pos} - {member.name}", color=discord.Color.gold())
+    embed.add_field(name="Points", value=str(u["points"]), inline=True)
+    embed.add_field(name="Wins", value=str(u["wins"]), inline=True)
+    embed.add_field(name="Losses", value=str(u["losses"]), inline=True)
+    embed.add_field(name="MVP (Win)", value=str(u["mvp_wins"]), inline=True)
+    embed.add_field(name="MVP (Loss)", value=str(u["mvp_losses"]), inline=True)
+    await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name="leaderboard", description="Show the server leaderboard")
+async def cmd_lb(interaction: discord.Interaction):
+    data = load_scores()
+    g = data.get(str(interaction.guild_id), {})
+    if not g: return await interaction.response.send_message("No scores yet!")
+    sorted_players = sorted(g.items(), key=lambda x: x[1]["points"], reverse=True)[:10]
+    desc = ""
+    for i, (uid, u) in enumerate(sorted_players, 1):
+        desc += f"{i}. <@{uid}> - {u['points']} pts ({u['wins']}W/{u['losses']}L)\n"
+    embed = discord.Embed(title="Leaderboard", description=desc, color=discord.Color.gold())
+    await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name="stop", description="Stop the current game and clean up")
+async def cmd_stop(interaction: discord.Interaction):
+    for lid, lobby in list(lobbies.items()):
+        if lobby.creator.id == interaction.user.id:
+            if lobby.started:
+                await interaction.response.send_message("Stopping game...", ephemeral=True)
+                await cleanup_game(lobby, interaction.guild)
+            else:
+                lobby.active = False
+                await _cancel_cleanup(lobby)
+                try:
+                    msg = await lobby.channel.fetch_message(lobby.message_id)
+                    await msg.edit(embed=discord.Embed(title="\u26d4 Cancelled", color=0xed4245), view=None)
+                except:
+                    pass
+                lobbies.pop(lid, None)
+                await interaction.response.send_message("Lobby cancelled.", ephemeral=True)
+            return
+    await interaction.response.send_message("No active game found.", ephemeral=True)
+
+@bot.tree.command(name="joinvc", description="Make the bot sit in your voice channel")
+async def cmd_joinvc(interaction: discord.Interaction):
+    if not interaction.user.voice or not interaction.user.voice.channel:
+        return await interaction.response.send_message("You're not in a voice channel!", ephemeral=True)
+    vc = interaction.user.voice.channel
+    try:
+        if interaction.guild.voice_client:
+            await interaction.guild.voice_client.move_to(vc)
+        else:
+            await vc.connect()
+        await interaction.response.send_message(f"Joined {vc.name}!", ephemeral=True)
+    except Exception as e:
+        await interaction.response.send_message(f"Failed: {e}", ephemeral=True)
+
+@bot.tree.command(name="leavevc", description="Make the bot leave voice channel")
+async def cmd_leavevc(interaction: discord.Interaction):
+    if interaction.guild.voice_client:
+        await interaction.guild.voice_client.disconnect()
+        await interaction.response.send_message("Left voice channel.", ephemeral=True)
+    else:
+        await interaction.response.send_message("Not in a voice channel.", ephemeral=True)
+
+@bot.tree.command(name="refreshratings", description="Refresh all rank nicknames")
+async def cmd_refresh(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    await recalculate_all_ranks(interaction.guild)
+    await interaction.followup.send("Rank nicknames refreshed!", ephemeral=True)
+
+@bot.tree.command(name="addpoints", description="Add or remove points from a player")
+async def cmd_addpoints(interaction: discord.Interaction, member: discord.Member, amount: int):
+    if not interaction.user.guild_permissions.administrator:
+        return await interaction.response.send_message("Only admins can use this.", ephemeral=True)
+    await interaction.response.defer(ephemeral=True)
+    data, u = get_user_data(interaction.guild_id, member.id, member.name)
+    u["points"] += amount
+    save_scores(data)
+    await recalculate_all_ranks(interaction.guild)
+    await interaction.followup.send(f"{'+' if amount >= 0 else ''}{amount} points for {member.mention}. Total: {u['points']}", ephemeral=True)
+
+
+@bot.event
+async def on_member_join(member):
+    role = await ensure_rank_role(member.guild)
+    if role:
+        try:
+            await member.add_roles(role, reason="Auto-rank on join")
+            await recalculate_all_ranks(member.guild)
+        except:
+            pass
+
+async def ensure_rank_role(guild):
+    role = next((r for r in guild.roles if ROLE_NAME in r.name), None)
+    if not role:
+        try:
+            role = await guild.create_role(name=ROLE_NAME, reason="Auto-created rank role")
+        except:
+            return None
+    return role
+
+async def ensure_get_rank_channel(guild):
+    global rank_message_id
+    target = discord.utils.get(guild.text_channels, name="get-rank")
+    if not target:
+        try:
+            target = await guild.create_text_channel("get-rank")
+        except:
+            return None
+    try:
+        msg = await target.fetch_message(rank_message_id)
+        return target
+    except:
+        pass
+    try:
+        msg = await target.send("React with 🏆 to get your **rank** role!\n\nYour nickname will be updated to show your rank based on points.")
+        await msg.add_reaction("🏆")
+        rank_message_id = msg.id
+    except:
+        pass
+    return target
+
+@bot.event
+async def on_ready():
+    print(f"[ONLINE] {bot.user} is online!")
+    for guild in bot.guilds:
+        await ensure_rank_role(guild)
+        await ensure_get_rank_channel(guild)
+        bot.tree.copy_global_to(guild=guild)
+        await bot.tree.sync(guild=guild)
+    print("[SYNCED] Commands synced to all guilds")
+
+@bot.event
+async def on_raw_reaction_add(payload):
+    if payload.message_id != rank_message_id or str(payload.emoji) != "🏆":
+        return
+    guild = bot.get_guild(payload.guild_id)
+    if not guild:
+        return
+    member = payload.member or (guild.get_member(payload.user_id) if payload.user_id else None)
+    if not member or member.bot:
+        return
+    role = guild.get_role(1508212570404687932)
+    if not role:
+        return
+    try:
+        await member.add_roles(role, reason="Reacted for rank")
+        asyncio.create_task(recalculate_all_ranks(guild))
+    except Exception as e:
+        print(f"[RANK ERROR] {e}")
+
+@bot.event
+async def on_raw_reaction_remove(payload):
+    if payload.message_id != rank_message_id or str(payload.emoji) != "🏆":
+        return
+    guild = bot.get_guild(payload.guild_id)
+    if not guild:
+        return
+    member = guild.get_member(payload.user_id)
+    if not member or member.bot:
+        return
+    role = guild.get_role(1508212570404687932)
+    if not role:
+        return
+    try:
+        await member.remove_roles(role, reason="Unreacted rank")
+        asyncio.create_task(recalculate_all_ranks(guild))
+    except Exception as e:
+        print(f"[RANK ERROR] {e}")
+
+
+@bot.command(name="win")
+async def win(ctx: commands.Context, team: str = None):
+    if not team or team not in ("1", "2"): return await ctx.send("Usage: `!win 1` or `!win 2`")
+    for lid, lobby in list(lobbies.items()):
+        if lobby.text_id == ctx.channel.id and lobby.started:
+            if not lobby.in_lobby(ctx.author.id) and ctx.author.id != lobby.creator.id:
+                return await ctx.send("You weren't in this game.")
+            if ctx.author.id != lobby.creator.id:
+                return await ctx.send("Only the creator can finish.")
+            w = 1 if team == "1" else 2
+            await ctx.send(f"Processing... Use the buttons for MVP selection.")
+            return
+    await ctx.send("Not an active game channel.")
+
+
+class GameModal(discord.ui.Modal, title="Game Credentials"):
+    match_id = discord.ui.TextInput(label="Match ID", placeholder="123456", min_length=1, max_length=20)
+    password = discord.ui.TextInput(label="Password", placeholder="7890", min_length=1, max_length=20)
+    key = discord.ui.TextInput(label="Key (optional)", placeholder="Only those with the key can join", required=False, max_length=20)
+
+    def __init__(self, mode):
+        super().__init__()
+        self.mode = mode
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if not self.match_id.value.isdigit() or not self.password.value.isdigit():
+            return await interaction.response.send_message("Match ID and Password must be numbers only!", ephemeral=True)
+        for l in lobbies.values():
+            if l.creator.id == interaction.user.id and (l.active or l.started):
+                return await interaction.response.send_message("You already have a lobby/game running! Use /stop to end it.", ephemeral=True)
+        lid = f"{interaction.user.id}_{datetime.datetime.now().timestamp()}"
+        lobby = Lobby(lid, self.mode, interaction.user, interaction.channel)
+        lobby.match_id = self.match_id.value
+        lobby.password = self.password.value
+        lobby.key = self.key.value.strip()
+        lobbies[lid] = lobby
+        await interaction.response.send_message(embed=build_embed(lobby), view=LobbyView(lobby))
+        msg = await interaction.original_response()
+        lobby.message_id = msg.id
+
+
+@bot.tree.command(name="1v1", description="Create a 1v1 lobby")
+async def cmd_1v1(interaction: discord.Interaction):
+    await interaction.response.send_modal(GameModal("1v1"))
+
+@bot.tree.command(name="2v2", description="Create a 2v2 lobby")
+async def cmd_2v2(interaction: discord.Interaction):
+    await interaction.response.send_modal(GameModal("2v2"))
+
+@bot.tree.command(name="3v3", description="Create a 3v3 lobby")
+async def cmd_3v3(interaction: discord.Interaction):
+    await interaction.response.send_modal(GameModal("3v3"))
+
+@bot.tree.command(name="4v4", description="Create a 4v4 lobby")
+async def cmd_4v4(interaction: discord.Interaction):
+    await interaction.response.send_modal(GameModal("4v4"))
+
+
+# ─── ADMIN PANEL ─────────────────────────────────────────
+
+class AdminLobbyView(View):
+    def __init__(self, lobbies_copy):
+        super().__init__(timeout=120)
+        for lid, lobby in lobbies_copy.items():
+            status = "🟢 Waiting" if lobby.active else ("🔴 Live" if lobby.started else "⚫ Ended")
+            label = f"{lobby.mode} by {lobby.creator.display_name} ({status})"
+            b = Button(label=label, style=discord.ButtonStyle.grey, row=0)
+            b.callback = self._make_cb(lid, lobby)
+            self.add_item(b)
+
+    def _make_cb(self, lid, lobby):
+        async def cb(i: discord.Interaction):
+            if i.user.id != ADMIN_ID:
+                return await i.response.send_message("Only the admin.", ephemeral=True)
+            view = AdminActionView(lid, lobby)
+            t = "🎮 **Active Lobby**" if lobby.active else ("⚔️ **Live Game**" if lobby.started else "**Ended**")
+            await i.response.edit_message(content=f"{t} — {lobby.mode} by {lobby.creator.mention}\nTeams: {len(lobby.team1)}v{len(lobby.team2)}", view=view)
+        return cb
+
+class AdminActionView(View):
+    def __init__(self, lid, lobby):
+        super().__init__(timeout=60)
+        self.lid = lid
+        self.lobby = lobby
+        c = Button(label="❌ Cancel Lobby", style=discord.ButtonStyle.red, disabled=not lobby.active)
+        c.callback = self.cancel_lobby; self.add_item(c)
+        e = Button(label="⏹ End Game", style=discord.ButtonStyle.grey, disabled=not lobby.started)
+        e.callback = self.end_game; self.add_item(e)
+        b = Button(label="🔙 Back", style=discord.ButtonStyle.blurple)
+        b.callback = self.go_back; self.add_item(b)
+
+    async def cancel_lobby(self, i):
+        if i.user.id != ADMIN_ID: return
+        l = self.lobby
+        if not l.active: return await i.response.send_message("Already inactive.", ephemeral=True)
+        l.active = False
+        await _cancel_cleanup(l)
+        try:
+            msg = await l.channel.fetch_message(l.message_id)
+            await msg.edit(embed=discord.Embed(title="❌ Cancelled by Admin", color=0xed4245), view=None)
+        except:
+            pass
+        lobbies.pop(self.lid, None)
+        await i.response.send_message("Lobby cancelled.", ephemeral=True)
+
+    async def end_game(self, i):
+        if i.user.id != ADMIN_ID: return
+        l = self.lobby
+        if not l.started: return await i.response.send_message("Not started.", ephemeral=True)
+        await i.response.defer(ephemeral=True)
+        await cleanup_game(l, i.guild)
+        await i.followup.send("Game ended and cleaned up.", ephemeral=True)
+
+    async def go_back(self, i):
+        if i.user.id != ADMIN_ID: return
+        await i.response.edit_message(content="Select a lobby:", view=AdminLobbyView({k: v for k, v in lobbies.items()}))
+
+@bot.tree.command(name="admin", description="Admin panel (hidden)")
+async def cmd_admin(interaction: discord.Interaction):
+    if interaction.user.id != ADMIN_ID:
+        return await interaction.response.send_message("You don't have permission.", ephemeral=True)
+    if not lobbies:
+        return await interaction.response.send_message("No active lobbies or games.", ephemeral=True)
+    await interaction.response.send_message("Select a lobby:", view=AdminLobbyView(dict(lobbies)), ephemeral=True)
+
+
+if __name__ == "__main__":
+    import asyncio, random
+    async def start():
+        for i in range(10):
+            try:
+                await bot.start(TOKEN)
+                return
+            except discord.HTTPException as e:
+                if e.status == 429:
+                    wait = min(30 * (2 ** i), 600)
+                    jitter = random.uniform(0, 5)
+                    print(f"Rate limited, retrying in {wait + jitter:.0f}s (attempt {i+1}/10)")
+                    await asyncio.sleep(wait + jitter)
+                else:
+                    raise
+    asyncio.run(start())
