@@ -1215,10 +1215,10 @@ async def cmd_refresh(interaction: discord.Interaction):
             return await interaction.followup.send("Missing permissions to read message history.", ephemeral=True)
         except Exception as e:
             log.error("refresh scan error: %s", e)
+        added = 0
+        removed = 0
+        bot_member = guild.get_member(bot.user.id) if bot.user else None
         if reacted_ids:
-            added = 0
-            removed = 0
-            bot_member = guild.get_member(bot.user.id) if bot.user else None
             for m in guild.members:
                 if m.bot:
                     continue
@@ -1232,10 +1232,13 @@ async def cmd_refresh(interaction: discord.Interaction):
                 elif has_role and not should_have:
                     if await safe_remove_role(m, role):
                         removed += 1
-            await recalculate_all_ranks(guild)
-            await interaction.followup.send(f"✅ {added} roles added, {removed} removed, nicknames refreshed.", ephemeral=True)
-        else:
-            await interaction.followup.send("No 🏆 reactions found in last 200 messages. Roles not touched.", ephemeral=True)
+        await recalculate_all_ranks(guild)
+        reply = f"✅ Nicknames refreshed."
+        if added or removed:
+            reply += f" ({added} roles added, {removed} removed)"
+        if not reacted_ids:
+            reply += " No 🏆 reactions found, roles untouched."
+        await interaction.followup.send(reply, ephemeral=True)
     except Exception as e:
         log.error("refreshratings error: %s", e)
         try:
