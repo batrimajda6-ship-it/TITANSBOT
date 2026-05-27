@@ -30,8 +30,8 @@ def save_scores(data):
         try:
             with open(BACKUP_FILE, "w") as f:
                 json.dump(data, f, indent=2)
-        except:
-            pass
+        except Exception as e:
+            print(f"[SAVE] backup write failed: {e}")
         with open(DATA_FILE, "w") as f:
             json.dump(data, f, indent=2)
 
@@ -54,6 +54,7 @@ def save_config(cfg):
 cfg = load_config()
 rank_message_id = cfg.get("rank_message_id", 1508197095385858120)
 rank_channel_id = cfg.get("rank_channel_id", None)
+rank_role_id = cfg.get("rank_role_id", 1508212570404687932)
 
 async def recalculate_all_ranks(guild):
     try:
@@ -82,8 +83,8 @@ async def recalculate_all_ranks(guild):
                 await m.edit(nick=new_nick)
                 await asyncio.sleep(0.15)
                 changed += 1
-            except:
-                pass
+            except Exception as nick_e2:
+                print(f"[RANKS] nickname edit failed for {m.id}: {nick_e2}")
         if changed:
             print(f"[RANKS] Updated {changed}/{len(ranked)} nicknames in {guild.name}")
     except Exception as e:
@@ -610,9 +611,9 @@ async def cmd_refresh(interaction: discord.Interaction):
         return await interaction.response.send_message("Only admin.", ephemeral=True)
     await interaction.response.defer(ephemeral=True)
     guild = interaction.guild
-    role = guild.get_role(1508212570404687932)
+    role = guild.get_role(rank_role_id)
     if not role:
-        return await interaction.followup.send("Rank role not found.", ephemeral=True)
+        return await interaction.followup.send("Rank role not found. Run /syncrank to fix.", ephemeral=True)
     channel = guild.get_channel(rank_channel_id) if rank_channel_id else None
     if not channel:
         channel = discord.utils.get(guild.text_channels, name="get-rank")
@@ -620,14 +621,14 @@ async def cmd_refresh(interaction: discord.Interaction):
         return await interaction.followup.send("Rank channel not found. Use /setrankchannel to set it.", ephemeral=True)
     reacted_ids = set()
     try:
-        async for msg in channel.history(limit=50):
+        async for msg in channel.history(limit=200):
             react = discord.utils.get(msg.reactions, emoji="🏆")
             if react:
                 async for u in react.users():
                     if not u.bot:
                         reacted_ids.add(u.id)
-    except:
-        pass
+    except Exception as e:
+        print(f"[REFRESH] scan error: {e}")
     if reacted_ids:
         added, removed = 0, 0
         for m in guild.members:
@@ -650,8 +651,7 @@ async def cmd_refresh(interaction: discord.Interaction):
         await recalculate_all_ranks(guild)
         await interaction.followup.send(f"✅ {added} roles added, {removed} removed, nicknames refreshed.", ephemeral=True)
     else:
-        await recalculate_all_ranks(guild)
-        await interaction.followup.send("Couldn't read reactions — nicknames refreshed only (roles untouched).", ephemeral=True)
+        await interaction.followup.send("No 🏆 reactions found in last 200 messages. Roles not touched. Mark a message with 🏆 or use /setrankchannel.", ephemeral=True)
 
 @bot.tree.command(name="syncrank", description="Give rank role to ALL members and recalculate nicknames")
 async def cmd_syncrank(interaction: discord.Interaction):
@@ -659,7 +659,7 @@ async def cmd_syncrank(interaction: discord.Interaction):
         return await interaction.response.send_message("Only admin.", ephemeral=True)
     await interaction.response.defer(ephemeral=True)
     guild = interaction.guild
-    role = guild.get_role(1508212570404687932)
+    role = guild.get_role(rank_role_id)
     if not role:
         return await interaction.followup.send("Rank role not found.", ephemeral=True)
     added = 0
@@ -728,12 +728,19 @@ async def on_member_join(member):
             pass
 
 async def ensure_rank_role(guild):
-    role = next((r for r in guild.roles if ROLE_NAME in r.name), None)
+    global rank_role_id
+    role = guild.get_role(rank_role_id) or next((r for r in guild.roles if ROLE_NAME.lower() in r.name.lower()), None)
     if not role:
         try:
             role = await guild.create_role(name=ROLE_NAME, reason="Auto-created rank role")
-        except:
+        except Exception as e:
+            print(f"[ENSURE ROLE] create failed: {e}")
             return None
+    if role.id != rank_role_id:
+        rank_role_id = role.id
+        c = load_config()
+        c["rank_role_id"] = role.id
+        save_config(c)
     return role
 
 async def ensure_get_rank_channel(guild):
@@ -753,7 +760,7 @@ async def ensure_get_rank_channel(guild):
             msg = await target.fetch_message(rank_message_id)
             return target
         except:
-            pass
+            print(f"[ENSURE CHANNEL] Couldn't fetch message {rank_message_id} in #{target.name}, will create new one")
     try:
         msg = await target.send("React with 🏆 to get your **rank** role!\n\nYour nickname will be updated to show your rank based on points.")
         await msg.add_reaction("🏆")
@@ -763,8 +770,8 @@ async def ensure_get_rank_channel(guild):
         c["rank_message_id"] = msg.id
         c["rank_channel_id"] = target.id
         save_config(c)
-    except:
-        pass
+    except Exception as e:
+        print(f"[ENSURE CHANNEL] failed to create rank message in #{target.name}: {e}")
     return target
 
 @bot.event
@@ -791,18 +798,21 @@ async def _handle_rank_reaction(guild, user_id, add):
             return
     if member.bot:
         return
-    role = guild.get_role(1508212570404687932)
+    role = guild.get_role(rank_role_id)
     if not role:
+        print(f"[RANK REACTION] No rank role found (id={rank_role_id})")
         return
     bot_member = guild.get_member(bot.user.id)
     if bot_member and role.position >= bot_member.top_role.position:
+        print(f"[RANK REACTION] Bot role too low — rank role is above bot's top role")
         return
     try:
         if add:
             await member.add_roles(role, reason="Reacted for rank")
         else:
             await member.remove_roles(role, reason="Unreacted rank")
-    except:
+    except Exception as e:
+        print(f"[RANK REACTION] role change failed for {member.id}: {e}")
         return
     await asyncio.sleep(2)
     asyncio.create_task(recalculate_all_ranks(guild))
