@@ -588,11 +588,49 @@ async def cmd_leavevc(interaction: discord.Interaction):
     else:
         await interaction.response.send_message("Not in a voice channel.", ephemeral=True)
 
-@bot.tree.command(name="refreshratings", description="Refresh all rank nicknames")
+@bot.tree.command(name="refreshratings", description="Sync rank roles + refresh nicknames")
 async def cmd_refresh(interaction: discord.Interaction):
+    if interaction.user.id != ADMIN_ID:
+        return await interaction.response.send_message("Only admin.", ephemeral=True)
     await interaction.response.defer(ephemeral=True)
-    await recalculate_all_ranks(interaction.guild)
-    await interaction.followup.send("Rank nicknames refreshed!", ephemeral=True)
+    guild = interaction.guild
+    role = guild.get_role(1508212570404687932)
+    if not role:
+        return await interaction.followup.send("Rank role not found.", ephemeral=True)
+    channel = discord.utils.get(guild.text_channels, name="get-rank")
+    if not channel:
+        return await interaction.followup.send("#get-rank channel not found.", ephemeral=True)
+    try:
+        msg = await channel.fetch_message(rank_message_id)
+        react = discord.utils.get(msg.reactions, emoji="🏆")
+        if not react:
+            return await interaction.followup.send("No 🏆 reactions found on the message.", ephemeral=True)
+        reacted_ids = set()
+        async for u in react.users():
+            if not u.bot:
+                reacted_ids.add(u.id)
+    except Exception as e:
+        return await interaction.followup.send(f"Couldn't read reactions: {e}", ephemeral=True)
+    added, removed = 0, 0
+    for m in guild.members:
+        if m.bot:
+            continue
+        has_role = role in m.roles
+        should_have = m.id in reacted_ids
+        if should_have and not has_role:
+            try:
+                await m.add_roles(role, reason="refreshratings sync")
+                added += 1
+            except:
+                pass
+        elif has_role and not should_have:
+            try:
+                await m.remove_roles(role, reason="refreshratings sync")
+                removed += 1
+            except:
+                pass
+    await recalculate_all_ranks(guild)
+    await interaction.followup.send(f"✅ {added} roles added, {removed} removed, nicknames refreshed.", ephemeral=True)
 
 @bot.tree.command(name="addpoints", description="Add or remove points from a player")
 async def cmd_addpoints(interaction: discord.Interaction, member: discord.Member, amount: int):
@@ -663,7 +701,12 @@ async def on_raw_reaction_add(payload):
     guild = bot.get_guild(payload.guild_id)
     if not guild:
         return
-    member = payload.member or (guild.get_member(payload.user_id) if payload.user_id else None)
+    member = payload.member
+    if not member:
+        try:
+            member = await guild.fetch_member(payload.user_id)
+        except:
+            member = None
     if not member or member.bot:
         return
     role = guild.get_role(1508212570404687932)
