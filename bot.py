@@ -37,7 +37,22 @@ def save_scores(data):
 
 
 ROLE_NAME = "rank"
-rank_message_id = 1508197095385858120
+CONFIG_FILE = os.path.join(DATA_DIR, "config.json")
+
+def load_config():
+    try:
+        with open(CONFIG_FILE) as f:
+            return json.load(f)
+    except:
+        return {}
+
+def save_config(cfg):
+    with LOCK:
+        with open(CONFIG_FILE, "w") as f:
+            json.dump(cfg, f, indent=2)
+
+cfg = load_config()
+rank_message_id = cfg.get("rank_message_id", 1508197095385858120)
 
 async def recalculate_all_ranks(guild):
     try:
@@ -602,12 +617,12 @@ async def cmd_refresh(interaction: discord.Interaction):
         return await interaction.followup.send("#get-rank channel not found.", ephemeral=True)
     reacted_ids = set()
     try:
-        msg = await channel.fetch_message(rank_message_id)
-        react = discord.utils.get(msg.reactions, emoji="🏆")
-        if react:
-            async for u in react.users():
-                if not u.bot:
-                    reacted_ids.add(u.id)
+        async for msg in channel.history(limit=50):
+            react = discord.utils.get(msg.reactions, emoji="🏆")
+            if react:
+                async for u in react.users():
+                    if not u.bot:
+                        reacted_ids.add(u.id)
     except:
         pass
     if reacted_ids:
@@ -685,6 +700,7 @@ async def ensure_get_rank_channel(guild):
         msg = await target.send("React with 🏆 to get your **rank** role!\n\nYour nickname will be updated to show your rank based on points.")
         await msg.add_reaction("🏆")
         rank_message_id = msg.id
+        save_config({"rank_message_id": msg.id})
     except:
         pass
     return target
