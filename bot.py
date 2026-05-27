@@ -538,6 +538,17 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 lobbies: dict[str, Lobby] = {}
 
 
+# ─── SERVERS (guild list) ────────────────────────────────
+
+@bot.tree.command(name="servers", description="Show all servers the bot is in")
+async def cmd_servers(interaction: discord.Interaction):
+    embed = discord.Embed(
+        title=f"I'm in {len(bot.guilds)} server(s)",
+        description="\n".join(f"{i}. {g.name} (`{g.id}`)" for i, g in enumerate(bot.guilds, 1)),
+        color=discord.Color.blurple()
+    )
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
 # ─── RANK / LEADERBOARD ─────────────────────────────────
 
 @bot.tree.command(name="rank", description="Show your rank and points")
@@ -777,6 +788,9 @@ async def ensure_get_rank_channel(guild):
 @bot.event
 async def on_ready():
     print(f"[ONLINE] {bot.user} is online!")
+    print(f"Bot is in {len(bot.guilds)} server(s):")
+    for g in bot.guilds:
+        print(f"  - {g.name} ({g.id})")
     for guild in bot.guilds:
         await ensure_rank_role(guild)
         await ensure_get_rank_channel(guild)
