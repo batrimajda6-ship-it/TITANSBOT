@@ -776,6 +776,9 @@ async def on_ready():
         bot.tree.copy_global_to(guild=guild)
         await bot.tree.sync(guild=guild)
     print("[SYNCED] Commands synced to all guilds")
+    if not hasattr(bot, "_periodic_started"):
+        bot._periodic_started = True
+        bot.loop.create_task(periodic_rank_refresh())
 
 async def _handle_rank_reaction(guild, user_id, add):
     if user_id == bot.user.id:
@@ -979,7 +982,18 @@ async def cmd_restore(interaction: discord.Interaction, attachment: discord.Atta
     except:
         return await interaction.response.send_message("Invalid JSON.", ephemeral=True)
     save_scores(data)
-    await interaction.response.send_message(f"✅ Restored scores for {sum(len(g) for g in data.values())} players!", ephemeral=True)
+    for guild in bot.guilds:
+        asyncio.create_task(recalculate_all_ranks(guild))
+    await interaction.response.send_message(f"✅ Restored scores for {sum(len(g) for g in data.values())} players! Nicknames refreshed.", ephemeral=True)
+
+
+async def periodic_rank_refresh():
+    await bot.wait_until_ready()
+    while not bot.is_closed():
+        await asyncio.sleep(1800)
+        for guild in bot.guilds:
+            asyncio.create_task(recalculate_all_ranks(guild))
+            await asyncio.sleep(5)
 
 
 if __name__ == "__main__":
