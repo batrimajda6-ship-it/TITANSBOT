@@ -269,7 +269,7 @@ async def recalculate_all_ranks(guild):
             if pts is not None:
                 scored.append((m, pts))
         zero_pts = [(m, 0) for m in members if str(m.id) not in g]
-        all_players = sorted(scored + zero_pts, key=lambda x: -x[1])
+        all_players = sorted(scored + zero_pts, key=lambda x: (-x[1], x[0].id))
         changed = 0
         tasks = []
         for pos, (m, pts) in enumerate(all_players, 1):
