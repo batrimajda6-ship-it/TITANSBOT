@@ -807,27 +807,28 @@ async def _handle_rank_reaction(guild, user_id, add):
     await asyncio.sleep(2)
     asyncio.create_task(recalculate_all_ranks(guild))
 
+def _is_rank_channel(guild, channel_id):
+    global rank_channel_id
+    if rank_channel_id:
+        return channel_id == rank_channel_id
+    ch = guild.get_channel(channel_id)
+    return ch is not None and ch.name == "get-rank"
+
 @bot.event
 async def on_raw_reaction_add(payload):
-    global rank_channel_id
     if str(payload.emoji) != "🏆":
         return
-    if rank_channel_id and payload.channel_id != rank_channel_id:
-        return
     guild = bot.get_guild(payload.guild_id)
-    if not guild:
+    if not guild or not _is_rank_channel(guild, payload.channel_id):
         return
     await _handle_rank_reaction(guild, payload.user_id, True)
 
 @bot.event
 async def on_raw_reaction_remove(payload):
-    global rank_channel_id
     if str(payload.emoji) != "🏆":
         return
-    if rank_channel_id and payload.channel_id != rank_channel_id:
-        return
     guild = bot.get_guild(payload.guild_id)
-    if not guild:
+    if not guild or not _is_rank_channel(guild, payload.channel_id):
         return
     await _handle_rank_reaction(guild, payload.user_id, False)
 
