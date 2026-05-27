@@ -53,6 +53,7 @@ def save_config(cfg):
 
 cfg = load_config()
 rank_message_id = cfg.get("rank_message_id", 1508197095385858120)
+rank_channel_id = cfg.get("rank_channel_id", None)
 
 async def recalculate_all_ranks(guild):
     try:
@@ -612,9 +613,11 @@ async def cmd_refresh(interaction: discord.Interaction):
     role = guild.get_role(1508212570404687932)
     if not role:
         return await interaction.followup.send("Rank role not found.", ephemeral=True)
-    channel = discord.utils.get(guild.text_channels, name="get-rank")
+    channel = guild.get_channel(rank_channel_id) if rank_channel_id else None
     if not channel:
-        return await interaction.followup.send("#get-rank channel not found.", ephemeral=True)
+        channel = discord.utils.get(guild.text_channels, name="get-rank")
+    if not channel:
+        return await interaction.followup.send("Rank channel not found. Use /setrankchannel to set it.", ephemeral=True)
     reacted_ids = set()
     try:
         async for msg in channel.history(limit=50):
@@ -672,6 +675,36 @@ async def cmd_syncrank(interaction: discord.Interaction):
     await recalculate_all_ranks(guild)
     await interaction.followup.send(f"✅ Rank role given to {added} members. Nicknames refreshed.", ephemeral=True)
 
+@bot.tree.command(name="setrankchannel", description="Set the channel where rank reactions are tracked")
+async def cmd_setrankchannel(interaction: discord.Interaction, channel: discord.TextChannel):
+    global rank_message_id, rank_channel_id
+    if interaction.user.id != ADMIN_ID:
+        return await interaction.response.send_message("Only admin.", ephemeral=True)
+    await interaction.response.defer(ephemeral=True)
+    rank_channel_id = channel.id
+    cfg = load_config()
+    cfg["rank_channel_id"] = channel.id
+    msg = None
+    async for m in channel.history(limit=50):
+        react = discord.utils.get(m.reactions, emoji="🏆")
+        if react:
+            msg = m
+            break
+    if msg:
+        rank_message_id = msg.id
+        cfg["rank_message_id"] = msg.id
+        save_config(cfg)
+        n = 0
+        react = discord.utils.get(msg.reactions, emoji="🏆")
+        if react:
+            async for u in react.users():
+                if not u.bot:
+                    n += 1
+        await interaction.followup.send(f"✅ Rank channel set to {channel.mention}. Found rank message with {n} 🏆 reactions. Use /refreshratings to sync roles.", ephemeral=True)
+    else:
+        save_config(cfg)
+        await interaction.followup.send(f"✅ Channel set to {channel.mention}, but no 🏆 message found in last 50. React with 🏆 on a message there, or use /syncrank to give everyone the role.", ephemeral=True)
+
 @bot.tree.command(name="addpoints", description="Add or remove points from a player")
 async def cmd_addpoints(interaction: discord.Interaction, member: discord.Member, amount: int):
     if not interaction.user.guild_permissions.administrator:
@@ -704,23 +737,32 @@ async def ensure_rank_role(guild):
     return role
 
 async def ensure_get_rank_channel(guild):
-    global rank_message_id
-    target = discord.utils.get(guild.text_channels, name="get-rank")
+    global rank_message_id, rank_channel_id
+    target = None
+    if rank_channel_id:
+        target = guild.get_channel(rank_channel_id)
+    if not target:
+        target = discord.utils.get(guild.text_channels, name="get-rank")
     if not target:
         try:
             target = await guild.create_text_channel("get-rank")
         except:
             return None
-    try:
-        msg = await target.fetch_message(rank_message_id)
-        return target
-    except:
-        pass
+    if rank_message_id:
+        try:
+            msg = await target.fetch_message(rank_message_id)
+            return target
+        except:
+            pass
     try:
         msg = await target.send("React with 🏆 to get your **rank** role!\n\nYour nickname will be updated to show your rank based on points.")
         await msg.add_reaction("🏆")
         rank_message_id = msg.id
-        save_config({"rank_message_id": msg.id})
+        rank_channel_id = target.id
+        c = load_config()
+        c["rank_message_id"] = msg.id
+        c["rank_channel_id"] = target.id
+        save_config(c)
     except:
         pass
     return target
@@ -764,25 +806,25 @@ async def _handle_rank_reaction(guild, user_id, add):
 
 @bot.event
 async def on_raw_reaction_add(payload):
+    global rank_channel_id
     if str(payload.emoji) != "🏆":
+        return
+    if rank_channel_id and payload.channel_id != rank_channel_id:
         return
     guild = bot.get_guild(payload.guild_id)
     if not guild:
-        return
-    channel = guild.get_channel(payload.channel_id)
-    if not channel or channel.name != "get-rank":
         return
     await _handle_rank_reaction(guild, payload.user_id, True)
 
 @bot.event
 async def on_raw_reaction_remove(payload):
+    global rank_channel_id
     if str(payload.emoji) != "🏆":
+        return
+    if rank_channel_id and payload.channel_id != rank_channel_id:
         return
     guild = bot.get_guild(payload.guild_id)
     if not guild:
-        return
-    channel = guild.get_channel(payload.channel_id)
-    if not channel or channel.name != "get-rank":
         return
     await _handle_rank_reaction(guild, payload.user_id, False)
 
