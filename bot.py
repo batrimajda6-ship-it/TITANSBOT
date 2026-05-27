@@ -814,6 +814,15 @@ async def _handle_rank_reaction(guild, user_id, add):
     except Exception as e:
         print(f"[RANK REACTION] role change failed for {member.id}: {e}")
         return
+    if not add:
+        base = member.display_name
+        if " | " in base:
+            base = base.rsplit(" | ", 1)[-1]
+            if member.display_name != base and bot_member and member.top_role < bot_member.top_role:
+                try:
+                    await member.edit(nick=base, reason="Unreacted rank — reset nickname")
+                except Exception as ne:
+                    print(f"[RANK REACTION] nickname reset failed for {member.id}: {ne}")
     await asyncio.sleep(2)
     asyncio.create_task(recalculate_all_ranks(guild))
 
