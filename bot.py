@@ -636,14 +636,12 @@ async def cmd_refresh(interaction: discord.Interaction):
                 try:
                     await m.add_roles(role, reason="refreshratings sync")
                     added += 1
-                    await asyncio.sleep(0.3)
                 except:
                     pass
             elif has_role and not should_have:
                 try:
                     await m.remove_roles(role, reason="refreshratings sync")
                     removed += 1
-                    await asyncio.sleep(0.3)
                 except:
                     pass
         await recalculate_all_ranks(guild)
@@ -669,7 +667,6 @@ async def cmd_syncrank(interaction: discord.Interaction):
             try:
                 await m.add_roles(role, reason="syncrank")
                 added += 1
-                await asyncio.sleep(0.2)
             except:
                 pass
     await recalculate_all_ranks(guild)
