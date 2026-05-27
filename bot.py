@@ -223,6 +223,9 @@ class KeyModal(discord.ui.Modal, title="Enter Game Key"):
             return await interaction.response.send_message("This lobby is closed.", ephemeral=True)
         if l.in_lobby(interaction.user.id):
             return await interaction.response.send_message("You're already in this lobby!", ephemeral=True)
+        role = interaction.guild.get_role(rank_role_id)
+        if not role or role not in interaction.user.roles:
+            return await interaction.response.send_message("You need to react with 🏆 in the rank channel first to play!", ephemeral=True)
         team_members = l.team1 if self.team == 1 else l.team2
         if len(team_members) >= l.max_per_team:
             return await interaction.response.send_message("That team is full!", ephemeral=True)
@@ -293,6 +296,9 @@ class LobbyView(View):
         l = self.lobby
         if not l.active: return await i.response.send_message("Closed.", ephemeral=True)
         if l.in_lobby(i.user.id): return await i.response.send_message("Already in!", ephemeral=True)
+        role = i.guild.get_role(rank_role_id)
+        if not role or role not in i.user.roles:
+            return await i.response.send_message("You need to react with 🏆 in the rank channel first to play!", ephemeral=True)
         team_members = l.team1 if team == 1 else l.team2
         if len(team_members) >= l.max_per_team: return await i.response.send_message("Full!", ephemeral=True)
         if l.key:
@@ -719,13 +725,7 @@ async def cmd_addpoints(interaction: discord.Interaction, member: discord.Member
 
 @bot.event
 async def on_member_join(member):
-    role = await ensure_rank_role(member.guild)
-    if role:
-        try:
-            await member.add_roles(role, reason="Auto-rank on join")
-            await recalculate_all_ranks(member.guild)
-        except:
-            pass
+    pass
 
 async def ensure_rank_role(guild):
     global rank_role_id
@@ -879,6 +879,9 @@ class GameModal(discord.ui.Modal, title="Game Credentials"):
     async def on_submit(self, interaction: discord.Interaction):
         if not self.match_id.value.isdigit() or not self.password.value.isdigit():
             return await interaction.response.send_message("Match ID and Password must be numbers only!", ephemeral=True)
+        role = interaction.guild.get_role(rank_role_id)
+        if not role or role not in interaction.user.roles:
+            return await interaction.response.send_message("You need to react with 🏆 in the rank channel first to play!", ephemeral=True)
         for l in lobbies.values():
             if l.creator.id == interaction.user.id and (l.active or l.started):
                 return await interaction.response.send_message("You already have a lobby/game running! Use /stop to end it.", ephemeral=True)
