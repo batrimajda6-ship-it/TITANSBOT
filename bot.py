@@ -1619,19 +1619,6 @@ def _is_rank_channel(guild, channel_id):
     return ch is not None and ch.name == "get-rank"
 
 
-async def periodic_rank_refresh():
-    await bot.wait_until_ready()
-    while not bot.is_closed():
-        try:
-            await asyncio.sleep(1800)
-            for guild in bot.guilds:
-                asyncio.create_task(recalculate_all_ranks(guild))
-        except asyncio.CancelledError:
-            break
-        except Exception as e:
-            log.error("periodic_rank_refresh error: %s", e)
-
-
 @bot.event
 async def on_ready():
     log.info("%s is online! (%d guilds)", bot.user, len(bot.guilds))
@@ -1646,9 +1633,6 @@ async def on_ready():
         except Exception as e:
             log.error("sync failed for %s: %s", guild.name, e)
     log.info("Commands synced to all guilds")
-    if not hasattr(bot, "_periodic_started"):
-        bot._periodic_started = True
-        bot.loop.create_task(periodic_rank_refresh())
 
 
 @bot.event
