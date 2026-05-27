@@ -1,7 +1,7 @@
 import discord
 from discord.ext import commands
 from discord.ui import View, Button
-import datetime, os, asyncio, json, threading, random, logging, tempfile, shutil
+import datetime, os, asyncio, json, threading, random, logging, shutil, sqlite3
 
 logging.basicConfig(
     level=logging.INFO,
@@ -14,52 +14,130 @@ TOKEN = os.getenv("DISCORD_TOKEN", "YOUR_BOT_TOKEN_HERE")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "1494693018975076392"))
 ADMIN_ROLE_ID = 1493705809496903921
 DATA_DIR = os.getenv("VOLUME_PATH", ".")
-DATA_FILE = os.path.join(DATA_DIR, "scores.json")
-BACKUP_FILE = DATA_FILE + ".bak"
+DB_FILE = os.path.join(DATA_DIR, "titansbot.db")
 CONFIG_FILE = os.path.join(DATA_DIR, "config.json")
 ROLE_NAME = "rank"
 
-SCORE_LOCK = threading.Lock()
 CONFIG_LOCK = threading.Lock()
 
 COOLDOWN_DEFAULT = 3
 COOLDOWN_ADMIN = 1
 COOLDOWN_LOBBIES = 2
 
-def _atomic_json_write(filepath, data):
-    tmp = filepath + ".tmp." + str(random.randint(100000, 999999))
+
+DB_INIT = """
+CREATE TABLE IF NOT EXISTS scores (
+    guild_id TEXT NOT NULL,
+    user_id  TEXT NOT NULL,
+    name     TEXT NOT NULL DEFAULT '',
+    points   INTEGER NOT NULL DEFAULT 0,
+    wins     INTEGER NOT NULL DEFAULT 0,
+    losses   INTEGER NOT NULL DEFAULT 0,
+    mvp_wins INTEGER NOT NULL DEFAULT 0,
+    mvp_losses INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (guild_id, user_id)
+);
+"""
+
+def get_db():
+    db = sqlite3.connect(DB_FILE, timeout=10)
+    db.row_factory = sqlite3.Row
+    db.execute("PRAGMA journal_mode=WAL")
+    db.execute("PRAGMA synchronous=NORMAL")
+    return db
+
+def init_db():
     try:
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
-        shutil.move(tmp, filepath)
+        db = get_db()
+        db.executescript(DB_INIT)
+        db.commit()
+        db.close()
+        log.info("Database initialized: %s", DB_FILE)
     except Exception as e:
-        log.error("atomic write failed for %s: %s", filepath, e)
-        try:
-            os.remove(tmp)
-        except:
-            pass
+        log.critical("Database init failed: %s", e)
         raise
 
 def load_scores():
-    with SCORE_LOCK:
-        for path in (DATA_FILE, BACKUP_FILE):
-            try:
-                with open(path, "r", encoding="utf-8") as f:
-                    return json.load(f)
-            except (FileNotFoundError, json.JSONDecodeError):
-                continue
+    try:
+        db = get_db()
+        rows = db.execute("SELECT guild_id, user_id, name, points, wins, losses, mvp_wins, mvp_losses FROM scores").fetchall()
+        db.close()
+        data = {}
+        for r in rows:
+            gid = str(r["guild_id"])
+            uid = str(r["user_id"])
+            g = data.setdefault(gid, {})
+            g[uid] = {
+                "name": r["name"],
+                "points": r["points"],
+                "wins": r["wins"],
+                "losses": r["losses"],
+                "mvp_wins": r["mvp_wins"],
+                "mvp_losses": r["mvp_losses"],
+            }
+        return data
+    except Exception as e:
+        log.error("load_scores error: %s", e)
         return {}
 
 def save_scores(data):
-    with SCORE_LOCK:
-        try:
-            _atomic_json_write(BACKUP_FILE, data)
-        except Exception as e:
-            log.error("backup write failed: %s", e)
-        try:
-            _atomic_json_write(DATA_FILE, data)
-        except Exception as e:
-            log.critical("scores write failed: %s", e)
+    try:
+        db = get_db()
+        db.execute("DELETE FROM scores")
+        for gid, users in data.items():
+            for uid, u in users.items():
+                db.execute(
+                    "INSERT INTO scores (guild_id, user_id, name, points, wins, losses, mvp_wins, mvp_losses) VALUES (?,?,?,?,?,?,?,?)",
+                    (str(gid), str(uid), u.get("name", ""), u.get("points", 0), u.get("wins", 0), u.get("losses", 0), u.get("mvp_wins", 0), u.get("mvp_losses", 0))
+                )
+        db.commit()
+        db.close()
+    except Exception as e:
+        log.error("save_scores error: %s", e)
+
+def get_user_data(guild_id, user_id, username):
+    try:
+        db = get_db()
+        row = db.execute("SELECT * FROM scores WHERE guild_id=? AND user_id=?", (str(guild_id), str(user_id))).fetchone()
+        if row:
+            u = {
+                "name": row["name"],
+                "points": row["points"],
+                "wins": row["wins"],
+                "losses": row["losses"],
+                "mvp_wins": row["mvp_wins"],
+                "mvp_losses": row["mvp_losses"],
+            }
+            gid_str = str(guild_id)
+            data = {}
+            rows_all = db.execute("SELECT * FROM scores WHERE guild_id=?", (gid_str,)).fetchall()
+            g = {}
+            for r in rows_all:
+                g[str(r["user_id"])] = {
+                    "name": r["name"], "points": r["points"], "wins": r["wins"],
+                    "losses": r["losses"], "mvp_wins": r["mvp_wins"], "mvp_losses": r["mvp_losses"],
+                }
+            data[gid_str] = g
+            db.close()
+            return data, u
+        u = {"name": username, "points": 0, "wins": 0, "losses": 0, "mvp_wins": 0, "mvp_losses": 0}
+        db.execute("INSERT INTO scores (guild_id, user_id, name) VALUES (?,?,?)", (str(guild_id), str(user_id), username))
+        db.commit()
+        data = {}
+        rows_all = db.execute("SELECT * FROM scores WHERE guild_id=?", (str(guild_id),)).fetchall()
+        g = {}
+        for r in rows_all:
+            g[str(r["user_id"])] = {
+                "name": r["name"], "points": r["points"], "wins": r["wins"],
+                "losses": r["losses"], "mvp_wins": r["mvp_wins"], "mvp_losses": r["mvp_losses"],
+            }
+        data[str(guild_id)] = g
+        db.close()
+        return data, u
+    except Exception as e:
+        log.error("get_user_data error: %s", e)
+        return {str(guild_id): {}}, {"name": username, "points": 0, "wins": 0, "losses": 0, "mvp_wins": 0, "mvp_losses": 0}
+
 
 def load_config():
     try:
@@ -70,23 +148,22 @@ def load_config():
 
 def save_config(cfg):
     with CONFIG_LOCK:
+        tmp = CONFIG_FILE + ".tmp." + str(random.randint(100000, 999999))
         try:
-            _atomic_json_write(CONFIG_FILE, cfg)
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(cfg, f, indent=2)
+            shutil.move(tmp, CONFIG_FILE)
         except Exception as e:
             log.error("config write failed: %s", e)
+            try:
+                os.remove(tmp)
+            except:
+                pass
 
 cfg = load_config()
 rank_message_id = cfg.get("rank_message_id", 1508197095385858120)
 rank_channel_id = cfg.get("rank_channel_id", None)
 rank_role_id = cfg.get("rank_role_id", 1508212570404687932)
-
-
-def get_user_data(guild_id, user_id, username):
-    data = load_scores()
-    g = data.setdefault(str(guild_id), {})
-    u = g.setdefault(str(user_id), {"name": username, "points": 0, "wins": 0, "losses": 0, "mvp_wins": 0, "mvp_losses": 0})
-    u["name"] = username
-    return data, u
 
 
 async def safe_nick_edit(member, new_nick, retries=2):
@@ -1384,16 +1461,20 @@ async def cmd_admin(interaction: discord.Interaction):
         log.error("admin command error: %s", e)
 
 
-@bot.tree.command(name="backup", description="Backup scores to a file")
+@bot.tree.command(name="backup", description="Backup scores to a JSON file")
 async def cmd_backup(interaction: discord.Interaction):
     try:
         if not admin_check(interaction):
             return await interaction.response.send_message("Only admin.", ephemeral=True)
-        path = BACKUP_FILE if os.path.exists(BACKUP_FILE) else (DATA_FILE if os.path.exists(DATA_FILE) else None)
-        if not path:
-            return await interaction.response.send_message("No scores file found.", ephemeral=True)
+        data = load_scores()
+        if not data:
+            return await interaction.response.send_message("No scores found.", ephemeral=True)
+        tmp = os.path.join(DATA_DIR, "backup_export.json")
         try:
-            await interaction.response.send_message(file=discord.File(path, filename="scores_backup.json"), ephemeral=True)
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+            await interaction.response.send_message(file=discord.File(tmp, filename="scores_backup.json"), ephemeral=True)
+            os.remove(tmp)
         except Exception as e:
             await interaction.response.send_message(f"Failed to send backup: {e}", ephemeral=True)
     except Exception as e:
@@ -1602,6 +1683,7 @@ async def on_command_error(ctx, error):
 
 
 if __name__ == "__main__":
+    init_db()
     async def start():
         for i in range(10):
             try:
