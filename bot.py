@@ -988,7 +988,7 @@ class AdminActionView(View):
 
 @bot.tree.command(name="admin", description="Admin panel (hidden)")
 async def cmd_admin(interaction: discord.Interaction):
-    if interaction.user.id != ADMIN_ID:
+    if not any(r.id == 1493705809496903921 for r in interaction.user.roles):
         return await interaction.response.send_message("You don't have permission.", ephemeral=True)
     if not lobbies:
         return await interaction.response.send_message("No active lobbies or games.", ephemeral=True)
