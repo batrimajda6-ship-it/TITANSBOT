@@ -5,6 +5,7 @@ import datetime, os, asyncio, json, threading
 
 TOKEN = os.getenv("DISCORD_TOKEN", "YOUR_BOT_TOKEN_HERE")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "1494693018975076392"))
+ADMIN_ROLE_ID = 1493705809496903921
 DATA_DIR = os.getenv("VOLUME_PATH", ".")
 DATA_FILE = os.path.join(DATA_DIR, "scores.json")
 LOCK = threading.Lock()
@@ -941,7 +942,7 @@ class AdminLobbyView(View):
 
     def _make_cb(self, lid, lobby):
         async def cb(i: discord.Interaction):
-            if i.user.id != ADMIN_ID:
+            if not any(r.id == ADMIN_ROLE_ID for r in i.user.roles):
                 return await i.response.send_message("Only the admin.", ephemeral=True)
             view = AdminActionView(lid, lobby)
             t = "🎮 **Active Lobby**" if lobby.active else ("⚔️ **Live Game**" if lobby.started else "**Ended**")
@@ -961,7 +962,7 @@ class AdminActionView(View):
         b.callback = self.go_back; self.add_item(b)
 
     async def cancel_lobby(self, i):
-        if i.user.id != ADMIN_ID: return
+        if not any(r.id == ADMIN_ROLE_ID for r in i.user.roles): return
         l = self.lobby
         if not l.active: return await i.response.send_message("Already inactive.", ephemeral=True)
         l.active = False
@@ -975,7 +976,7 @@ class AdminActionView(View):
         await i.response.send_message("Lobby cancelled.", ephemeral=True)
 
     async def end_game(self, i):
-        if i.user.id != ADMIN_ID: return
+        if not any(r.id == ADMIN_ROLE_ID for r in i.user.roles): return
         l = self.lobby
         if not l.started: return await i.response.send_message("Not started.", ephemeral=True)
         await i.response.defer(ephemeral=True)
@@ -983,12 +984,12 @@ class AdminActionView(View):
         await i.followup.send("Game ended and cleaned up.", ephemeral=True)
 
     async def go_back(self, i):
-        if i.user.id != ADMIN_ID: return
+        if not any(r.id == ADMIN_ROLE_ID for r in i.user.roles): return
         await i.response.edit_message(content="Select a lobby:", view=AdminLobbyView({k: v for k, v in lobbies.items()}))
 
 @bot.tree.command(name="admin", description="Admin panel (hidden)")
 async def cmd_admin(interaction: discord.Interaction):
-    if not any(r.id == 1493705809496903921 for r in interaction.user.roles):
+    if not any(r.id == ADMIN_ROLE_ID for r in interaction.user.roles):
         return await interaction.response.send_message("You don't have permission.", ephemeral=True)
     if not lobbies:
         return await interaction.response.send_message("No active lobbies or games.", ephemeral=True)
