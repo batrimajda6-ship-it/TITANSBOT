@@ -652,6 +652,29 @@ async def cmd_refresh(interaction: discord.Interaction):
         await recalculate_all_ranks(guild)
         await interaction.followup.send("Couldn't read reactions — nicknames refreshed only (roles untouched).", ephemeral=True)
 
+@bot.tree.command(name="syncrank", description="Give rank role to ALL members and recalculate nicknames")
+async def cmd_syncrank(interaction: discord.Interaction):
+    if interaction.user.id != ADMIN_ID:
+        return await interaction.response.send_message("Only admin.", ephemeral=True)
+    await interaction.response.defer(ephemeral=True)
+    guild = interaction.guild
+    role = guild.get_role(1508212570404687932)
+    if not role:
+        return await interaction.followup.send("Rank role not found.", ephemeral=True)
+    added = 0
+    for m in guild.members:
+        if m.bot:
+            continue
+        if role not in m.roles:
+            try:
+                await m.add_roles(role, reason="syncrank")
+                added += 1
+                await asyncio.sleep(0.2)
+            except:
+                pass
+    await recalculate_all_ranks(guild)
+    await interaction.followup.send(f"✅ Rank role given to {added} members. Nicknames refreshed.", ephemeral=True)
+
 @bot.tree.command(name="addpoints", description="Add or remove points from a player")
 async def cmd_addpoints(interaction: discord.Interaction, member: discord.Member, amount: int):
     if not interaction.user.guild_permissions.administrator:
@@ -715,65 +738,56 @@ async def on_ready():
         await bot.tree.sync(guild=guild)
     print("[SYNCED] Commands synced to all guilds")
 
-@bot.event
-async def on_raw_reaction_add(payload):
-    if payload.message_id != rank_message_id or str(payload.emoji) != "🏆":
+async def _handle_rank_reaction(guild, user_id, add):
+    if user_id == bot.user.id:
         return
-    guild = bot.get_guild(payload.guild_id)
-    if not guild:
-        return
-    member = payload.member
+    member = guild.get_member(user_id)
     if not member:
         try:
-            member = await guild.fetch_member(payload.user_id)
+            member = await guild.fetch_member(user_id)
         except:
-            member = None
-    if not member or member.bot:
+            return
+    if member.bot:
         return
     role = guild.get_role(1508212570404687932)
     if not role:
         return
     bot_member = guild.get_member(bot.user.id)
     if bot_member and role.position >= bot_member.top_role.position:
-        try:
-            await member.send("I can't give you the rank role — my role is too low in the server settings. An admin needs to move my role **above** the rank role.")
-        except:
-            pass
         return
     try:
-        await member.add_roles(role, reason="Reacted for rank")
-    except Exception as e:
-        try:
-            await member.send(f"Couldn't add rank role: {e}. Tell an admin.")
-        except:
-            pass
-        return
-    try:
-        await member.send("✅ You got the rank role! Your nickname will update shortly.")
+        if add:
+            await member.add_roles(role, reason="Reacted for rank")
+        else:
+            await member.remove_roles(role, reason="Unreacted rank")
     except:
-        pass
+        return
     await asyncio.sleep(2)
     asyncio.create_task(recalculate_all_ranks(guild))
 
 @bot.event
-async def on_raw_reaction_remove(payload):
-    if payload.message_id != rank_message_id or str(payload.emoji) != "🏆":
+async def on_raw_reaction_add(payload):
+    if str(payload.emoji) != "🏆":
         return
     guild = bot.get_guild(payload.guild_id)
     if not guild:
         return
-    member = guild.get_member(payload.user_id)
-    if not member or member.bot:
+    channel = guild.get_channel(payload.channel_id)
+    if not channel or channel.name != "get-rank":
         return
-    role = guild.get_role(1508212570404687932)
-    if not role:
+    await _handle_rank_reaction(guild, payload.user_id, True)
+
+@bot.event
+async def on_raw_reaction_remove(payload):
+    if str(payload.emoji) != "🏆":
         return
-    try:
-        await member.remove_roles(role, reason="Unreacted rank")
-    except:
-        pass
-    await asyncio.sleep(2)
-    asyncio.create_task(recalculate_all_ranks(guild))
+    guild = bot.get_guild(payload.guild_id)
+    if not guild:
+        return
+    channel = guild.get_channel(payload.channel_id)
+    if not channel or channel.name != "get-rank":
+        return
+    await _handle_rank_reaction(guild, payload.user_id, False)
 
 
 @bot.command(name="win")
