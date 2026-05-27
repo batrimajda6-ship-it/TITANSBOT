@@ -98,42 +98,25 @@ def save_scores(data):
 def get_user_data(guild_id, user_id, username):
     try:
         db = get_db()
-        row = db.execute("SELECT * FROM scores WHERE guild_id=? AND user_id=?", (str(guild_id), str(user_id))).fetchone()
-        if row:
-            u = {
-                "name": row["name"],
-                "points": row["points"],
-                "wins": row["wins"],
-                "losses": row["losses"],
-                "mvp_wins": row["mvp_wins"],
-                "mvp_losses": row["mvp_losses"],
-            }
-            gid_str = str(guild_id)
-            data = {}
-            rows_all = db.execute("SELECT * FROM scores WHERE guild_id=?", (gid_str,)).fetchall()
-            g = {}
-            for r in rows_all:
-                g[str(r["user_id"])] = {
-                    "name": r["name"], "points": r["points"], "wins": r["wins"],
-                    "losses": r["losses"], "mvp_wins": r["mvp_wins"], "mvp_losses": r["mvp_losses"],
-                }
-            data[gid_str] = g
-            db.close()
-            return data, u
-        u = {"name": username, "points": 0, "wins": 0, "losses": 0, "mvp_wins": 0, "mvp_losses": 0}
-        db.execute("INSERT INTO scores (guild_id, user_id, name) VALUES (?,?,?)", (str(guild_id), str(user_id), username))
-        db.commit()
-        data = {}
-        rows_all = db.execute("SELECT * FROM scores WHERE guild_id=?", (str(guild_id),)).fetchall()
+        gid_str = str(guild_id)
+        uid_str = str(user_id)
+        row = db.execute("SELECT * FROM scores WHERE guild_id=? AND user_id=?", (gid_str, uid_str)).fetchone()
+        rows_all = db.execute("SELECT * FROM scores WHERE guild_id=?", (gid_str,)).fetchall()
         g = {}
         for r in rows_all:
             g[str(r["user_id"])] = {
                 "name": r["name"], "points": r["points"], "wins": r["wins"],
                 "losses": r["losses"], "mvp_wins": r["mvp_wins"], "mvp_losses": r["mvp_losses"],
             }
-        data[str(guild_id)] = g
+        if row:
+            db.close()
+            return {gid_str: g}, g[uid_str]
+        db.execute("INSERT INTO scores (guild_id, user_id, name) VALUES (?,?,?)", (gid_str, uid_str, username))
+        db.commit()
+        u = {"name": username, "points": 0, "wins": 0, "losses": 0, "mvp_wins": 0, "mvp_losses": 0}
+        g[uid_str] = u
         db.close()
-        return data, u
+        return {gid_str: g}, u
     except Exception as e:
         log.error("get_user_data error: %s", e)
         return {str(guild_id): {}}, {"name": username, "points": 0, "wins": 0, "losses": 0, "mvp_wins": 0, "mvp_losses": 0}
