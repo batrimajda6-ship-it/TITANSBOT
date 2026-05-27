@@ -600,37 +600,42 @@ async def cmd_refresh(interaction: discord.Interaction):
     channel = discord.utils.get(guild.text_channels, name="get-rank")
     if not channel:
         return await interaction.followup.send("#get-rank channel not found.", ephemeral=True)
+    reacted_ids = set()
     try:
         msg = await channel.fetch_message(rank_message_id)
         react = discord.utils.get(msg.reactions, emoji="🏆")
-        if not react:
-            return await interaction.followup.send("No 🏆 reactions found on the message.", ephemeral=True)
-        reacted_ids = set()
-        async for u in react.users():
-            if not u.bot:
-                reacted_ids.add(u.id)
-    except Exception as e:
-        return await interaction.followup.send(f"Couldn't read reactions: {e}", ephemeral=True)
-    added, removed = 0, 0
-    for m in guild.members:
-        if m.bot:
-            continue
-        has_role = role in m.roles
-        should_have = m.id in reacted_ids
-        if should_have and not has_role:
-            try:
-                await m.add_roles(role, reason="refreshratings sync")
-                added += 1
-            except:
-                pass
-        elif has_role and not should_have:
-            try:
-                await m.remove_roles(role, reason="refreshratings sync")
-                removed += 1
-            except:
-                pass
-    await recalculate_all_ranks(guild)
-    await interaction.followup.send(f"✅ {added} roles added, {removed} removed, nicknames refreshed.", ephemeral=True)
+        if react:
+            async for u in react.users():
+                if not u.bot:
+                    reacted_ids.add(u.id)
+    except:
+        pass
+    if reacted_ids:
+        added, removed = 0, 0
+        for m in guild.members:
+            if m.bot:
+                continue
+            has_role = role in m.roles
+            should_have = m.id in reacted_ids
+            if should_have and not has_role:
+                try:
+                    await m.add_roles(role, reason="refreshratings sync")
+                    added += 1
+                    await asyncio.sleep(0.3)
+                except:
+                    pass
+            elif has_role and not should_have:
+                try:
+                    await m.remove_roles(role, reason="refreshratings sync")
+                    removed += 1
+                    await asyncio.sleep(0.3)
+                except:
+                    pass
+        await recalculate_all_ranks(guild)
+        await interaction.followup.send(f"✅ {added} roles added, {removed} removed, nicknames refreshed.", ephemeral=True)
+    else:
+        await recalculate_all_ranks(guild)
+        await interaction.followup.send("Couldn't read reactions — nicknames refreshed only (roles untouched).", ephemeral=True)
 
 @bot.tree.command(name="addpoints", description="Add or remove points from a player")
 async def cmd_addpoints(interaction: discord.Interaction, member: discord.Member, amount: int):
