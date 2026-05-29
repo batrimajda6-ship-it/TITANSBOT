@@ -1,9 +1,9 @@
 import discord
 from discord.ext import commands
 from discord.ui import View, Button
-import datetime, os, asyncio, json, threading, random, logging, shutil, sqlite3, hashlib, hmac, struct
+import datetime, os, asyncio, json, threading, random, logging, shutil, sqlite3, hashlib, hmac, sys, time
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse
 
 logging.basicConfig(
     level=logging.INFO,
@@ -12,7 +12,9 @@ logging.basicConfig(
 )
 log = logging.getLogger("TitansBot")
 
-TOKEN = os.getenv("DISCORD_TOKEN", "YOUR_BOT_TOKEN_HERE")
+TOKEN = os.getenv("DISCORD_TOKEN")
+if not TOKEN:
+    sys.exit("FATAL: DISCORD_TOKEN environment variable not set")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "1494693018975076392"))
 ADMIN_ROLE_ID = 1493705809496903921
 DATA_DIR = os.getenv("VOLUME_PATH", ".")
@@ -92,11 +94,14 @@ def load_scores():
 def save_scores(data):
     try:
         db = get_db()
-        db.execute("DELETE FROM scores")
         for gid, users in data.items():
             for uid, u in users.items():
                 db.execute(
-                    "INSERT INTO scores (guild_id, user_id, name, points, wins, losses, mvp_wins, mvp_losses) VALUES (?,?,?,?,?,?,?,?)",
+                    "INSERT INTO scores (guild_id, user_id, name, points, wins, losses, mvp_wins, mvp_losses) "
+                    "VALUES (?,?,?,?,?,?,?,?) "
+                    "ON CONFLICT(guild_id, user_id) DO UPDATE SET "
+                    "name=excluded.name, points=excluded.points, wins=excluded.wins, losses=excluded.losses, "
+                    "mvp_wins=excluded.mvp_wins, mvp_losses=excluded.mvp_losses",
                     (str(gid), str(uid), u.get("name", ""), u.get("points", 0), u.get("wins", 0), u.get("losses", 0), u.get("mvp_wins", 0), u.get("mvp_losses", 0))
                 )
         db.commit()
@@ -1728,9 +1733,17 @@ class LicenseHandler(BaseHTTPRequestHandler):
 
 def run_http_server():
     port = int(os.getenv("PORT", 8080))
-    server = HTTPServer(("0.0.0.0", port), LicenseHandler)
-    log.info("License API server listening on port %d", port)
-    server.serve_forever()
+    for i in range(5):
+        try:
+            server = HTTPServer(("0.0.0.0", port), LicenseHandler)
+            log.info("License API server listening on port %d", port)
+            server.serve_forever()
+            return
+        except OSError as e:
+            log.warning("HTTP server failed on port %d: %s (attempt %d/5)", port, e, i+1)
+            if i < 4:
+                time.sleep(3)
+    log.error("HTTP server could not start after 5 attempts")
 
 # ── License Slash Commands ────────────────────────────────────────────
 @bot.tree.command(name="genkeys", description="[Admin] Generate N license keys")
@@ -1793,14 +1806,14 @@ if __name__ == "__main__":
                 await bot.start(TOKEN)
                 return
             except discord.HTTPException as e:
-                if e.status == 429:
-                    wait = min(30 * (2 ** i), 600)
-                    jitter = random.uniform(0, 5)
-                    log.warning("Rate limited, retrying in %.0fs (attempt %d/10)", wait + jitter, i+1)
-                    await asyncio.sleep(wait + jitter)
-                else:
-                    raise
+                wait = min(30 * (2 ** i), 600)
+                jitter = random.uniform(0, 5)
+                log.warning("Discord %s, retrying in %.0fs (attempt %d/10)", e.status, wait + jitter, i+1)
+                await asyncio.sleep(wait + jitter)
             except Exception as e:
                 log.critical("Fatal startup error: %s", e)
-                raise
+                if i < 9:
+                    await asyncio.sleep(10)
+                else:
+                    raise
     asyncio.run(start())
