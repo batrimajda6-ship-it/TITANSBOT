@@ -1334,46 +1334,6 @@ async def cmd_addpoints(interaction: discord.Interaction, member: discord.Member
         log.error("addpoints error: %s", e)
 
 
-@bot.tree.command(name="1v1", description="Create a 1v1 lobby")
-async def cmd_1v1(interaction: discord.Interaction):
-    try:
-        if ratelimit(f"lobby_{interaction.user.id}", 2, 10.0):
-            return await interaction.response.send_message("You're creating lobbies too fast. Slow down.", ephemeral=True)
-        await interaction.response.send_modal(GameModal("1v1"))
-    except Exception as e:
-        log.error("1v1 error: %s", e)
-
-
-@bot.tree.command(name="2v2", description="Create a 2v2 lobby")
-async def cmd_2v2(interaction: discord.Interaction):
-    try:
-        if ratelimit(f"lobby_{interaction.user.id}", 2, 10.0):
-            return await interaction.response.send_message("You're creating lobbies too fast. Slow down.", ephemeral=True)
-        await interaction.response.send_modal(GameModal("2v2"))
-    except Exception as e:
-        log.error("2v2 error: %s", e)
-
-
-@bot.tree.command(name="3v3", description="Create a 3v3 lobby")
-async def cmd_3v3(interaction: discord.Interaction):
-    try:
-        if ratelimit(f"lobby_{interaction.user.id}", 2, 10.0):
-            return await interaction.response.send_message("You're creating lobbies too fast. Slow down.", ephemeral=True)
-        await interaction.response.send_modal(GameModal("3v3"))
-    except Exception as e:
-        log.error("3v3 error: %s", e)
-
-
-@bot.tree.command(name="4v4", description="Create a 4v4 lobby")
-async def cmd_4v4(interaction: discord.Interaction):
-    try:
-        if ratelimit(f"lobby_{interaction.user.id}", 2, 10.0):
-            return await interaction.response.send_message("You're creating lobbies too fast. Slow down.", ephemeral=True)
-        await interaction.response.send_modal(GameModal("4v4"))
-    except Exception as e:
-        log.error("4v4 error: %s", e)
-
-
 class AdminLobbyView(View):
     def __init__(self, lobbies_copy):
         super().__init__(timeout=120)
@@ -1452,6 +1412,46 @@ class AdminActionView(View):
             await i.response.edit_message(content="Select a lobby:", view=AdminLobbyView({k: v for k, v in lobbies.items()}))
         except Exception as e:
             log.error("admin go_back error: %s", e)
+
+
+class ModeSelect(discord.ui.Select):
+    def __init__(self):
+        options = [
+            discord.SelectOption(label="1v1", description="Create a 1v1 lobby", emoji="⚔️"),
+            discord.SelectOption(label="2v2", description="Create a 2v2 lobby", emoji="⚔️"),
+            discord.SelectOption(label="3v3", description="Create a 3v3 lobby", emoji="⚔️"),
+            discord.SelectOption(label="4v4", description="Create a 4v4 lobby", emoji="⚔️"),
+        ]
+        super().__init__(placeholder="Choose a game mode...", min_values=1, max_values=1, options=options)
+
+    async def callback(self, interaction: discord.Interaction):
+        try:
+            if ratelimit(f"lobby_{interaction.user.id}", 2, 10.0):
+                return await interaction.response.send_message("You're creating lobbies too fast. Slow down.", ephemeral=True)
+            await interaction.response.send_modal(GameModal(self.values[0]))
+        except Exception as e:
+            log.error("ModeSelect error: %s", e)
+
+class ModeView(View):
+    def __init__(self):
+        super().__init__(timeout=60)
+        self.add_item(ModeSelect())
+
+
+@bot.tree.command(name="play", description="Create a lobby (1v1, 2v2, 3v3, 4v4)")
+async def cmd_play(interaction: discord.Interaction):
+    try:
+        await interaction.response.send_message("Select a game mode:", view=ModeView(), ephemeral=True)
+    except Exception as e:
+        log.error("play error: %s", e)
+
+
+@bot.command(name="play")
+async def prefix_play(ctx):
+    try:
+        await ctx.send("Select a game mode:", view=ModeView())
+    except Exception as e:
+        log.error("!play error: %s", e)
 
 
 @bot.tree.command(name="admin", description="Admin panel (hidden)")
