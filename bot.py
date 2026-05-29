@@ -28,6 +28,19 @@ COOLDOWN_DEFAULT = 3
 COOLDOWN_ADMIN = 1
 COOLDOWN_LOBBIES = 2
 
+# ── Score cache ───────────────────────────────────────────────────────
+_score_cache = {}
+_score_cache_time = 0
+_SCORE_CACHE_TTL = 30  # seconds
+
+def get_scores_cached():
+    global _score_cache, _score_cache_time
+    now = datetime.datetime.now().timestamp()
+    if now - _score_cache_time > _SCORE_CACHE_TTL:
+        _score_cache = load_scores()
+        _score_cache_time = now
+    return _score_cache
+
 
 DB_INIT = """
 CREATE TABLE IF NOT EXISTS scores (
@@ -340,7 +353,7 @@ class Lobby:
 
 def build_embed(lobby):
     crown = "\U0001f451"
-    scores = load_scores()
+    scores = get_scores_cached()
     g = scores.get(str(lobby.channel.guild.id) if hasattr(lobby.channel, 'guild') else "", {})
     def pts(m):
         p = g.get(str(m.id), {}).get("points", 0)
@@ -542,10 +555,6 @@ class LobbyView(View):
         await self._defer_refresh(i)
         if l.is_full:
             await _start_cleanup_timer(l)
-        try:
-            await i.user.send(f"Joined Team {team} \u2022 {l.mode.upper()} lobby")
-        except:
-            pass
 
     async def _ephemeral(self, i, msg):
         try:
@@ -579,10 +588,6 @@ class LobbyView(View):
         l.remove(i.user.id)
         await _cancel_cleanup(l)
         await self._defer_refresh(i)
-        try:
-            await i.user.send(f"Left {l.mode.upper()} lobby")
-        except:
-            pass
 
     async def start(self, i):
         l = self.lobby
