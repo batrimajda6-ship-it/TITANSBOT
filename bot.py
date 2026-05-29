@@ -1334,6 +1334,38 @@ async def cmd_addpoints(interaction: discord.Interaction, member: discord.Member
         log.error("addpoints error: %s", e)
 
 
+@bot.tree.command(name="1v1", description="Create a 1v1 lobby")
+async def cmd_1v1(interaction: discord.Interaction):
+    try:
+        await interaction.response.send_modal(GameModal("1v1"))
+    except Exception as e:
+        log.error("1v1 error: %s", e)
+
+
+@bot.tree.command(name="2v2", description="Create a 2v2 lobby")
+async def cmd_2v2(interaction: discord.Interaction):
+    try:
+        await interaction.response.send_modal(GameModal("2v2"))
+    except Exception as e:
+        log.error("2v2 error: %s", e)
+
+
+@bot.tree.command(name="3v3", description="Create a 3v3 lobby")
+async def cmd_3v3(interaction: discord.Interaction):
+    try:
+        await interaction.response.send_modal(GameModal("3v3"))
+    except Exception as e:
+        log.error("3v3 error: %s", e)
+
+
+@bot.tree.command(name="4v4", description="Create a 4v4 lobby")
+async def cmd_4v4(interaction: discord.Interaction):
+    try:
+        await interaction.response.send_modal(GameModal("4v4"))
+    except Exception as e:
+        log.error("4v4 error: %s", e)
+
+
 class AdminLobbyView(View):
     def __init__(self, lobbies_copy):
         super().__init__(timeout=120)
