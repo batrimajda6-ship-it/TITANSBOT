@@ -1,7 +1,9 @@
 import discord
 from discord.ext import commands
 from discord.ui import View, Button
-import datetime, os, asyncio, json, threading, random, logging, shutil, sqlite3
+import datetime, os, asyncio, json, threading, random, logging, shutil, sqlite3, hashlib, hmac, struct
+from http.server import HTTPServer, BaseHTTPRequestHandler
+from urllib.parse import urlparse, parse_qs
 
 logging.basicConfig(
     level=logging.INFO,
@@ -36,6 +38,13 @@ CREATE TABLE IF NOT EXISTS scores (
     mvp_wins INTEGER NOT NULL DEFAULT 0,
     mvp_losses INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (guild_id, user_id)
+);
+CREATE TABLE IF NOT EXISTS licenses (
+    key_id       TEXT PRIMARY KEY,
+    machine_id   TEXT DEFAULT NULL,
+    generated_by TEXT NOT NULL DEFAULT '',
+    created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+    activated_at TEXT DEFAULT NULL
 );
 """
 
@@ -1651,9 +1660,133 @@ async def on_raw_reaction_remove(payload):
 async def on_command_error(ctx, error):
     log.warning("Prefix command error: %s", error)
 
+# ── License HTTP API ──────────────────────────────────────────────────
+LICENSE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+LICENSE_SECRET  = "M0nSt3rL1c3ns3K3yG3n2024!@#$%"
+
+def generate_license_key():
+    raw_id = "".join(random.choice(LICENSE_ALPHABET) for _ in range(8))
+    h = hmac.new(LICENSE_SECRET.encode(), (LICENSE_SECRET + raw_id).encode(), hashlib.sha256).digest()
+    check = "".join(LICENSE_ALPHABET[b % len(LICENSE_ALPHABET)] for b in h[:8])
+    return f"MONSTER-{raw_id}-{check}"
+
+class LicenseHandler(BaseHTTPRequestHandler):
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", 0))
+        body = self.rfile.read(length) if length else b"{}"
+        try:
+            data = json.loads(body)
+        except Exception:
+            data = {}
+        key = (data.get("key") or "").strip().upper()
+        machine_id = (data.get("machine_id") or "").strip().upper()
+        resp = self.handle_verify(key, machine_id)
+        self.send_json(resp)
+
+    def do_GET(self):
+        parsed = urlparse(self.path)
+        if parsed.path == "/api/ping":
+            self.send_json({"ok": True, "bot": "TitansBot"})
+        else:
+            self.send_json({"ok": False, "error": "not_found"})
+
+    def handle_verify(self, key, machine_id):
+        if not key or not machine_id:
+            return {"ok": False, "error": "missing_key_or_machine_id"}
+        try:
+            db = get_db()
+            row = db.execute("SELECT * FROM licenses WHERE key_id = ?", (key,)).fetchone()
+            if not row:
+                db.close()
+                return {"ok": False, "error": "key_not_found"}
+            existing_hid = row["machine_id"]
+            if existing_hid is None:
+                db.execute("UPDATE licenses SET machine_id = ?, activated_at = datetime('now') WHERE key_id = ?", (machine_id, key))
+                db.commit()
+                db.close()
+                return {"ok": True, "status": "activated"}
+            if existing_hid == machine_id:
+                db.close()
+                return {"ok": True, "status": "already_activated_same_pc"}
+            db.close()
+            return {"ok": False, "error": "key_already_activated", "message": "This key is already activated on another PC"}
+        except Exception as e:
+            log.error("License verify error: %s", e)
+            return {"ok": False, "error": "server_error"}
+
+    def send_json(self, data):
+        msg = json.dumps(data).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Content-Length", str(len(msg)))
+        self.end_headers()
+        self.wfile.write(msg)
+
+    def log_message(self, fmt, *args):
+        log.info("HTTP %s", fmt % args)
+
+def run_http_server():
+    port = int(os.getenv("PORT", 8080))
+    server = HTTPServer(("0.0.0.0", port), LicenseHandler)
+    log.info("License API server listening on port %d", port)
+    server.serve_forever()
+
+# ── License Slash Commands ────────────────────────────────────────────
+@bot.tree.command(name="genkeys", description="[Admin] Generate N license keys")
+async def genkeys(interaction: discord.Interaction, count: int = 1):
+    if interaction.user.id != ADMIN_ID and ADMIN_ROLE_ID not in [r.id for r in interaction.user.roles]:
+        return await interaction.response.send_message("You don't have permission.", ephemeral=True)
+    if count < 1 or count > 50:
+        return await interaction.response.send_message("Count must be 1-50.", ephemeral=True)
+    keys = []
+    db = get_db()
+    for _ in range(count):
+        k = generate_license_key()
+        db.execute("INSERT OR IGNORE INTO licenses (key_id, generated_by) VALUES (?, ?)", (k, str(interaction.user.id)))
+        keys.append(k)
+    db.commit()
+    db.close()
+    msg = f"**{len(keys)} key(s) generated:**\n```\n" + "\n".join(keys) + "\n```"
+    await interaction.response.send_message(msg, ephemeral=True)
+
+@bot.tree.command(name="addkey", description="[Admin] Register an existing license key")
+async def addkey(interaction: discord.Interaction, key: str):
+    if interaction.user.id != ADMIN_ID and ADMIN_ROLE_ID not in [r.id for r in interaction.user.roles]:
+        return await interaction.response.send_message("You don't have permission.", ephemeral=True)
+    key = key.strip().upper()
+    if not (key.startswith("MONSTER-") and len(key) == 25):
+        return await interaction.response.send_message("Invalid key format. Expected: MONSTER-XXXXXXXX-XXXXXXXX", ephemeral=True)
+    db = get_db()
+    try:
+        db.execute("INSERT INTO licenses (key_id, generated_by) VALUES (?, ?)", (key, str(interaction.user.id)))
+        db.commit()
+        await interaction.response.send_message(f"Key `{key}` registered.", ephemeral=True)
+    except sqlite3.IntegrityError:
+        await interaction.response.send_message("That key already exists in the database.", ephemeral=True)
+    finally:
+        db.close()
+
+@bot.tree.command(name="listkeys", description="[Admin] List all license keys")
+async def listkeys(interaction: discord.Interaction):
+    if interaction.user.id != ADMIN_ID and ADMIN_ROLE_ID not in [r.id for r in interaction.user.roles]:
+        return await interaction.response.send_message("You don't have permission.", ephemeral=True)
+    db = get_db()
+    rows = db.execute("SELECT * FROM licenses ORDER BY created_at DESC LIMIT 50").fetchall()
+    db.close()
+    if not rows:
+        return await interaction.response.send_message("No keys in database.", ephemeral=True)
+    lines = []
+    for r in rows:
+        status = "ACTIVATED" if r["machine_id"] else "UNUSED"
+        lines.append(f"{r['key_id']} [{status}]")
+    msg = "**License Keys (last 50):**\n```\n" + "\n".join(lines) + "\n```"
+    await interaction.response.send_message(msg, ephemeral=True)
+
 
 if __name__ == "__main__":
     init_db()
+    threading.Thread(target=run_http_server, daemon=True).start()
     async def start():
         for i in range(10):
             try:
