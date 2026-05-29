@@ -14,7 +14,12 @@ log = logging.getLogger("TitansBot")
 
 TOKEN = os.getenv("DISCORD_TOKEN")
 if not TOKEN:
-    sys.exit("FATAL: DISCORD_TOKEN environment variable not set")
+    TOKEN = os.getenv("DISCORD_BOT_TOKEN")
+if not TOKEN:
+    TOKEN = os.getenv("BOT_TOKEN")
+if not TOKEN:
+    log.critical("No Discord token found! Set DISCORD_TOKEN env var.")
+    sys.exit(1)
 ADMIN_ID = int(os.getenv("ADMIN_ID", "1494693018975076392"))
 ADMIN_ROLE_ID = 1493705809496903921
 DATA_DIR = os.getenv("VOLUME_PATH", ".")
@@ -1659,6 +1664,11 @@ async def on_ready():
     log.info("%s is online! (%d guilds)", bot.user, len(bot.guilds))
     for g in bot.guilds:
         log.info("  - %s (%s)", g.name, g.id)
+    try:
+        await bot.tree.sync()
+        log.info("Global commands synced successfully")
+    except Exception as e:
+        log.error("Global sync failed: %s", e)
     for guild in bot.guilds:
         await ensure_rank_role(guild)
         await ensure_get_rank_channel(guild)
@@ -1670,7 +1680,17 @@ async def on_ready():
     log.info("Commands synced to all guilds")
 
 
-@bot.event
+@bot.tree.command(name="sync", description="[Admin] Force resync all slash commands")
+async def cmd_sync(interaction: discord.Interaction):
+    if not admin_check(interaction):
+        return await interaction.response.send_message("Only admin.", ephemeral=True)
+    try:
+        await interaction.response.defer(ephemeral=True)
+        await bot.tree.sync()
+        await interaction.followup.send("✅ Global commands synced!", ephemeral=True)
+    except Exception as e:
+        log.error("sync command error: %s", e)
+        await interaction.followup.send(f"Sync failed: {e}", ephemeral=True)
 async def on_raw_reaction_add(payload):
     try:
         if str(payload.emoji) != "🏆":
