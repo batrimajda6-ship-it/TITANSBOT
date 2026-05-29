@@ -1426,8 +1426,6 @@ class ModeSelect(discord.ui.Select):
 
     async def callback(self, interaction: discord.Interaction):
         try:
-            if ratelimit(f"lobby_{interaction.user.id}", 2, 10.0):
-                return await interaction.response.send_message("You're creating lobbies too fast. Slow down.", ephemeral=True)
             await interaction.response.send_modal(GameModal(self.values[0]))
         except Exception as e:
             log.error("ModeSelect error: %s", e)
