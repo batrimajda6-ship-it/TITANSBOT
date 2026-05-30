@@ -1653,10 +1653,14 @@ async def _handle_rank_reaction(guild, user_id, add):
 
 def _is_rank_channel(guild, channel_id):
     global rank_channel_id
+    ch = guild.get_channel(channel_id)
+    if not ch:
+        return False
+    if ch.name == "get-rank":
+        return True
     if rank_channel_id:
         return channel_id == rank_channel_id
-    ch = guild.get_channel(channel_id)
-    return ch is not None and ch.name == "get-rank"
+    return False
 
 
 @bot.event
