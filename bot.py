@@ -1708,7 +1708,7 @@ async def ensure_get_rank_channel(guild):
             except:
                 pass
         try:
-            msg = await target.send("React with 🏆 to get your **rank** role!\n\nYour nickname will be updated to show your rank based on points.")
+            msg = await target.send("React with 🏆 to get the **APOSTADO PLAYER** role and access to the bot!\n\nYour nickname will also be tracked with a rank based on points.")
             await msg.add_reaction("🏆")
             rank_message_id = msg.id
             rank_channel_id = target.id
@@ -1803,24 +1803,33 @@ async def _handle_rank_reaction(guild, user_id, add):
         if not member or member.bot:
             return
         role = guild.get_role(rank_role_id)
-        if not role:
-            return
+        access_role = guild.get_role(apostado_role_id) or await ensure_apostado_role(guild)
         bot_member = guild.get_member(bot.user.id) if bot.user else None
-        if bot_member and role.position >= bot_member.top_role.position:
+        if role and bot_member and role.position >= bot_member.top_role.position:
             log.warning("Rank role is above bot's top role in %s", guild.name)
             return
         if add:
-            ok = await safe_add_role(member, role)
-            if not ok:
-                log.warning("Failed to add rank role to %s in %s", member.id, guild.name)
+            if role:
+                ok = await safe_add_role(member, role)
+                if not ok:
+                    log.warning("Failed to add rank role to %s in %s", member.id, guild.name)
+            if access_role:
+                ok = await safe_add_role(member, access_role)
+                if not ok:
+                    log.warning("Failed to add access role to %s in %s", member.id, guild.name)
         else:
-            ok = await safe_remove_role(member, role)
-            if not ok:
-                log.warning("Failed to remove rank role from %s in %s", member.id, guild.name)
-            if ok:
-                base = strip_rank_prefix(member.display_name)
-                if member.display_name != base and bot_member and member.top_role < bot_member.top_role:
-                    await safe_nick_edit(member, base)
+            if role:
+                ok = await safe_remove_role(member, role)
+                if not ok:
+                    log.warning("Failed to remove rank role from %s in %s", member.id, guild.name)
+                if ok:
+                    base = strip_rank_prefix(member.display_name)
+                    if member.display_name != base and bot_member and member.top_role < bot_member.top_role:
+                        await safe_nick_edit(member, base)
+            if access_role:
+                ok = await safe_remove_role(member, access_role)
+                if not ok:
+                    log.warning("Failed to remove access role from %s in %s", member.id, guild.name)
         _spawn(recalculate_all_ranks(guild))
     except Exception as e:
         log.error("_handle_rank_reaction error: %s", e)
