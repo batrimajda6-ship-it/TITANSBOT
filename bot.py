@@ -41,6 +41,7 @@ DATA_DIR = os.getenv("VOLUME_PATH", ".")
 DB_FILE = os.path.join(DATA_DIR, "titansbot.db")
 CONFIG_FILE = os.path.join(DATA_DIR, "config.json")
 ROLE_NAME = "rank"
+APOSTADO_ROLE_NAME = "𝘼𝙋𝙊𝙎𝙏𝘼𝘿𝙊 𝙋𝙇𝘼𝙔𝙀𝙍"
 
 CONFIG_LOCK = threading.Lock()
 SCORE_LOCK = threading.Lock()
@@ -206,6 +207,7 @@ cfg = load_config()
 rank_message_id = cfg.get("rank_message_id", 1508197095385858120)
 rank_channel_id = cfg.get("rank_channel_id", None)
 rank_role_id = cfg.get("rank_role_id", 1508212570404687932)
+apostado_role_id = cfg.get("apostado_role_id", None)
 
 
 _RANK_PREFIX_RE = re.compile(r"^Rank \d+ \| ")
