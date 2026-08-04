@@ -12,6 +12,21 @@ logging.basicConfig(
 )
 log = logging.getLogger("TitansBot")
 
+def _load_env_file(path=".env"):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, _, v = line.partition("=")
+                os.environ.setdefault(k.strip(), v.strip())
+    except FileNotFoundError:
+        pass
+
+_load_env_file(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
+_load_env_file(".env")
+
 TOKEN = os.getenv("DISCORD_TOKEN")
 if not TOKEN:
     TOKEN = os.getenv("DISCORD_BOT_TOKEN")
