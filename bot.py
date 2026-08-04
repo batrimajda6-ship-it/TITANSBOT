@@ -37,11 +37,12 @@ if not TOKEN:
     sys.exit(1)
 ADMIN_ID = int(os.getenv("ADMIN_ID", "1494693018975076392"))
 ADMIN_ROLE_ID = 1493705809496903921
+ADMIN_ROLE_ID_2 = 1533757074738122864
 DATA_DIR = os.getenv("VOLUME_PATH", ".")
 DB_FILE = os.path.join(DATA_DIR, "titansbot.db")
 CONFIG_FILE = os.path.join(DATA_DIR, "config.json")
 ROLE_NAME = "rank"
-APOSTADO_ROLE_NAME = "𝘼𝙋𝙊𝙎𝙏𝘼𝘿𝙊 𝙋𝙇𝘼𝙔𝙀𝙍"
+APOSTADO_ROLE_NAME = "ð˜¼ð™‹ð™Šð™Žð™ð˜¼ð˜¿ð™Š ð™‹ð™‡ð˜¼ð™”ð™€ð™"
 
 CONFIG_LOCK = threading.Lock()
 SCORE_LOCK = threading.Lock()
@@ -50,7 +51,7 @@ COOLDOWN_DEFAULT = 3
 COOLDOWN_ADMIN = 1
 COOLDOWN_LOBBIES = 2
 
-# ── Score cache ───────────────────────────────────────────────────────
+# â”€â”€ Score cache â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 _score_cache = {}
 _score_cache_time = 0
 _SCORE_CACHE_TTL = 30  # seconds
@@ -545,7 +546,7 @@ class KeyModal(discord.ui.Modal, title="Enter Game Key"):
                 return await interaction.response.send_message("You're already in this lobby!", ephemeral=True)
             role = interaction.guild.get_role(apostado_role_id) if interaction.guild else None
             if not role or role not in interaction.user.roles:
-                return await interaction.response.send_message("You need to react with 🏆 in the APOSTADO channel first to play!", ephemeral=True)
+                return await interaction.response.send_message("You need to react with ðŸ† in the APOSTADO channel first to play!", ephemeral=True)
             team_members = l.team1 if self.team == 1 else l.team2
             if len(team_members) >= l.max_per_team:
                 return await interaction.response.send_message("That team is full!", ephemeral=True)
@@ -616,7 +617,7 @@ class LobbyView(View):
             return await self._ephemeral(i, "You're already in this lobby!")
         role = i.guild.get_role(apostado_role_id) if i.guild else None
         if not role or role not in i.user.roles:
-            return await self._ephemeral(i, "You need to react with 🏆 in the APOSTADO channel first to play!")
+            return await self._ephemeral(i, "You need to react with ðŸ† in the APOSTADO channel first to play!")
         team_members = l.team1 if team == 1 else l.team2
         if len(team_members) >= l.max_per_team:
             return await self._ephemeral(i, "That team is full!")
@@ -740,7 +741,7 @@ class LobbyView(View):
             return
         l.active = False
         l.started = True
-        embed = discord.Embed(title=f"\U0001f3ae {l.mode.upper()} — LIVE", color=0x5865F2)
+        embed = discord.Embed(title=f"\U0001f3ae {l.mode.upper()} â€” LIVE", color=0x5865F2)
         embed.add_field(name=f"\U0001f535 Team 1 ({len(l.team1)})", value="\n".join(m.mention for m in l.team1), inline=True)
         embed.add_field(name=f"\U0001f534 Team 2 ({len(l.team2)})", value="\n".join(m.mention for m in l.team2), inline=True)
         embed.add_field(name="\u200b", value="\u200b", inline=True)
@@ -824,7 +825,7 @@ class PostGameView(View):
     async def _restore_match_view(self, i, lobby):
         if not lobby:
             return
-        embed = discord.Embed(title=f"\U0001f3ae {lobby.mode.upper()} — LIVE", color=0x5865F2)
+        embed = discord.Embed(title=f"\U0001f3ae {lobby.mode.upper()} â€” LIVE", color=0x5865F2)
         embed.add_field(name=f"\U0001f535 Team 1 ({len(lobby.team1)})", value="\n".join(m.mention for m in lobby.team1), inline=True)
         embed.add_field(name=f"\U0001f534 Team 2 ({len(lobby.team2)})", value="\n".join(m.mention for m in lobby.team2), inline=True)
         embed.set_footer(text="\u23f0 Game in progress")
@@ -1042,7 +1043,7 @@ class GameModal(discord.ui.Modal, title="Game Credentials"):
                 return await interaction.response.send_message("Match ID and Password must be numbers only!", ephemeral=True)
             role = interaction.guild.get_role(apostado_role_id) if interaction.guild else None
             if not role or role not in interaction.user.roles:
-                return await interaction.response.send_message("You need to react with 🏆 in the APOSTADO channel first to play!", ephemeral=True)
+                return await interaction.response.send_message("You need to react with ðŸ† in the APOSTADO channel first to play!", ephemeral=True)
             for l in list(lobbies.values()):
                 if l.creator.id == interaction.user.id and (l.active or l.started):
                     return await interaction.response.send_message("You already have a lobby/game running! Use /stop to end it.", ephemeral=True)
@@ -1121,7 +1122,7 @@ def admin_check(interaction: discord.Interaction) -> bool:
     guild = interaction.guild
     if guild:
         member = guild.get_member(interaction.user.id)
-        if member and any(r.id == ADMIN_ROLE_ID for r in member.roles):
+        if member and any(r.id in (ADMIN_ROLE_ID, ADMIN_ROLE_ID_2) for r in member.roles):
             return True
     return False
 
@@ -1292,7 +1293,7 @@ async def cmd_refresh(interaction: discord.Interaction):
         reacted_ids = set()
         try:
             async for msg in channel.history(limit=200):
-                react = discord.utils.get(msg.reactions, emoji="🏆")
+                react = discord.utils.get(msg.reactions, emoji="ðŸ†")
                 if react:
                     async for u in react.users():
                         if not u.bot:
@@ -1319,11 +1320,11 @@ async def cmd_refresh(interaction: discord.Interaction):
                     if await safe_remove_role(m, role):
                         removed += 1
         await recalculate_all_ranks(guild)
-        reply = f"✅ Nicknames refreshed."
+        reply = f"âœ… Nicknames refreshed."
         if added or removed:
             reply += f" ({added} roles added, {removed} removed)"
         if not reacted_ids:
-            reply += " No 🏆 reactions found, roles untouched."
+            reply += " No ðŸ† reactions found, roles untouched."
         await interaction.followup.send(reply, ephemeral=True)
     except Exception as e:
         log.error("refreshratings error: %s", e)
@@ -1356,7 +1357,7 @@ async def cmd_syncrank(interaction: discord.Interaction):
                 if await safe_add_role(m, role):
                     added += 1
         await recalculate_all_ranks(guild)
-        await interaction.followup.send(f"✅ Rank role given to {added} members. Nicknames refreshed.", ephemeral=True)
+        await interaction.followup.send(f"âœ… Rank role given to {added} members. Nicknames refreshed.", ephemeral=True)
     except Exception as e:
         log.error("syncrank error: %s", e)
 
@@ -1374,7 +1375,7 @@ async def cmd_setrankchannel(interaction: discord.Interaction, channel: discord.
         msg = None
         try:
             async for m in channel.history(limit=50):
-                react = discord.utils.get(m.reactions, emoji="🏆")
+                react = discord.utils.get(m.reactions, emoji="ðŸ†")
                 if react:
                     msg = m
                     break
@@ -1385,7 +1386,7 @@ async def cmd_setrankchannel(interaction: discord.Interaction, channel: discord.
             cfg["rank_message_id"] = msg.id
             save_config(cfg)
             n = 0
-            react = discord.utils.get(msg.reactions, emoji="🏆")
+            react = discord.utils.get(msg.reactions, emoji="ðŸ†")
             if react:
                 try:
                     async for u in react.users():
@@ -1393,10 +1394,10 @@ async def cmd_setrankchannel(interaction: discord.Interaction, channel: discord.
                             n += 1
                 except:
                     pass
-            await interaction.followup.send(f"✅ Rank channel set to {channel.mention}. Found rank message with {n} 🏆 reactions. Use /refreshratings to sync roles.", ephemeral=True)
+            await interaction.followup.send(f"âœ… Rank channel set to {channel.mention}. Found rank message with {n} ðŸ† reactions. Use /refreshratings to sync roles.", ephemeral=True)
         else:
             save_config(cfg)
-            await interaction.followup.send(f"✅ Channel set to {channel.mention}, but no 🏆 message found in last 50. React with 🏆 on a message there, or use /syncrank.", ephemeral=True)
+            await interaction.followup.send(f"âœ… Channel set to {channel.mention}, but no ðŸ† message found in last 50. React with ðŸ† on a message there, or use /syncrank.", ephemeral=True)
     except Exception as e:
         log.error("setrankchannel error: %s", e)
 
@@ -1414,19 +1415,19 @@ async def cmd_setapostadochannel(interaction: discord.Interaction, channel: disc
         msg = None
         try:
             async for m in channel.history(limit=50):
-                react = discord.utils.get(m.reactions, emoji="🏆")
+                react = discord.utils.get(m.reactions, emoji="ðŸ†")
                 if react:
                     msg = m
                     break
         except:
             pass
         if msg:
-            await msg.add_reaction("🏆")
-            await interaction.followup.send(f"✅ APOSTADO channel set to {channel.mention}. Found existing 🏆 message. Use /refreshratings to sync roles.", ephemeral=True)
+            await msg.add_reaction("ðŸ†")
+            await interaction.followup.send(f"âœ… APOSTADO channel set to {channel.mention}. Found existing ðŸ† message. Use /refreshratings to sync roles.", ephemeral=True)
         else:
-            msg = await channel.send("React with 🏆 to get the **APOSTADO PLAYER** role and access the bot!")
-            await msg.add_reaction("🏆")
-            await interaction.followup.send(f"✅ APOSTADO channel set to {channel.mention}. Created new reaction message.", ephemeral=True)
+            msg = await channel.send("React with ðŸ† to get the **APOSTADO PLAYER** role and access the bot!")
+            await msg.add_reaction("ðŸ†")
+            await interaction.followup.send(f"âœ… APOSTADO channel set to {channel.mention}. Created new reaction message.", ephemeral=True)
     except Exception as e:
         log.error("setapostadochannel error: %s", e)
 
@@ -1487,7 +1488,7 @@ class AdminLobbyView(View):
     def __init__(self, lobbies_copy):
         super().__init__(timeout=120)
         for lid, lobby in lobbies_copy.items():
-            status = "🟢 Waiting" if lobby.active else ("🔴 Live" if lobby.started else "⚫ Ended")
+            status = "ðŸŸ¢ Waiting" if lobby.active else ("ðŸ”´ Live" if lobby.started else "âš« Ended")
             label = f"{lobby.mode} by {lobby.creator.display_name} ({status})"
             b = Button(label=label, style=discord.ButtonStyle.grey, row=0)
             b.callback = self._make_cb(lid, lobby)
@@ -1499,9 +1500,9 @@ class AdminLobbyView(View):
                 if not admin_check(i):
                     return await i.response.send_message("Only admin.", ephemeral=True)
                 view = AdminActionView(lid, lobby)
-                t = "🎮 **Active Lobby**" if lobby.active else ("⚔️ **Live Game**" if lobby.started else "**Ended**")
+                t = "ðŸŽ® **Active Lobby**" if lobby.active else ("âš”ï¸ **Live Game**" if lobby.started else "**Ended**")
                 try:
-                    await i.response.edit_message(content=f"{t} — {lobby.mode} by {lobby.creator.mention}\nTeams: {len(lobby.team1)}v{len(lobby.team2)}", view=view)
+                    await i.response.edit_message(content=f"{t} â€” {lobby.mode} by {lobby.creator.mention}\nTeams: {len(lobby.team1)}v{len(lobby.team2)}", view=view)
                 except:
                     pass
             except Exception as e:
@@ -1514,11 +1515,11 @@ class AdminActionView(View):
         super().__init__(timeout=60)
         self.lid = lid
         self.lobby = lobby
-        c = Button(label="❌ Cancel Lobby", style=discord.ButtonStyle.red, disabled=not lobby.active)
+        c = Button(label="âŒ Cancel Lobby", style=discord.ButtonStyle.red, disabled=not lobby.active)
         c.callback = self.cancel_lobby; self.add_item(c)
-        e = Button(label="⏹ End Game", style=discord.ButtonStyle.grey, disabled=not lobby.started)
+        e = Button(label="â¹ End Game", style=discord.ButtonStyle.grey, disabled=not lobby.started)
         e.callback = self.end_game; self.add_item(e)
-        b = Button(label="🔙 Back", style=discord.ButtonStyle.blurple)
+        b = Button(label="ðŸ”™ Back", style=discord.ButtonStyle.blurple)
         b.callback = self.go_back; self.add_item(b)
 
     async def cancel_lobby(self, i):
@@ -1533,7 +1534,7 @@ class AdminActionView(View):
                 msg = await safe_fetch_message(l.channel, l.message_id)
                 if msg:
                     try:
-                        await msg.edit(embed=discord.Embed(title="❌ Cancelled by Admin", color=0xed4245), view=None)
+                        await msg.edit(embed=discord.Embed(title="âŒ Cancelled by Admin", color=0xed4245), view=None)
                     except:
                         pass
             lobbies.pop(self.lid, None)
@@ -1566,10 +1567,10 @@ class AdminActionView(View):
 class ModeSelect(discord.ui.Select):
     def __init__(self):
         options = [
-            discord.SelectOption(label="1v1", description="Create a 1v1 lobby", emoji="⚔️"),
-            discord.SelectOption(label="2v2", description="Create a 2v2 lobby", emoji="⚔️"),
-            discord.SelectOption(label="3v3", description="Create a 3v3 lobby", emoji="⚔️"),
-            discord.SelectOption(label="4v4", description="Create a 4v4 lobby", emoji="⚔️"),
+            discord.SelectOption(label="1v1", description="Create a 1v1 lobby", emoji="âš”ï¸"),
+            discord.SelectOption(label="2v2", description="Create a 2v2 lobby", emoji="âš”ï¸"),
+            discord.SelectOption(label="3v3", description="Create a 3v3 lobby", emoji="âš”ï¸"),
+            discord.SelectOption(label="4v4", description="Create a 4v4 lobby", emoji="âš”ï¸"),
         ]
         super().__init__(placeholder="Choose a game mode...", min_values=1, max_values=1, options=options)
 
@@ -1651,7 +1652,7 @@ async def cmd_restore(interaction: discord.Interaction, attachment: discord.Atta
         for guild in bot.guilds:
             _spawn(recalculate_all_ranks(guild))
         player_count = sum(len(g) for g in data.values()) if data else 0
-        await interaction.response.send_message(f"✅ Restored scores for {player_count} players! Nicknames being refreshed.", ephemeral=True)
+        await interaction.response.send_message(f"âœ… Restored scores for {player_count} players! Nicknames being refreshed.", ephemeral=True)
     except Exception as e:
         log.error("restore error: %s", e)
 
@@ -1708,8 +1709,8 @@ async def ensure_get_rank_channel(guild):
             except:
                 pass
         try:
-            msg = await target.send("React with 🏆 to get the **APOSTADO PLAYER** role and access to the bot!\n\nYour nickname will also be tracked with a rank based on points.")
-            await msg.add_reaction("🏆")
+            msg = await target.send("React with ðŸ† to get the **APOSTADO PLAYER** role and access to the bot!\n\nYour nickname will also be tracked with a rank based on points.")
+            await msg.add_reaction("ðŸ†")
             rank_message_id = msg.id
             rank_channel_id = target.id
             c = load_config()
@@ -1941,7 +1942,7 @@ async def cmd_sync(interaction: discord.Interaction):
     try:
         await interaction.response.defer(ephemeral=True)
         await bot.tree.sync()
-        await interaction.followup.send("✅ Global commands synced!", ephemeral=True)
+        await interaction.followup.send("âœ… Global commands synced!", ephemeral=True)
     except Exception as e:
         log.error("sync command error: %s", e)
         await interaction.followup.send(f"Sync failed: {e}", ephemeral=True)
@@ -1950,7 +1951,7 @@ async def cmd_sync(interaction: discord.Interaction):
 @bot.event
 async def on_raw_reaction_add(payload):
     try:
-        if str(payload.emoji) != "🏆":
+        if str(payload.emoji) != "ðŸ†":
             return
         guild = bot.get_guild(payload.guild_id)
         if not guild:
@@ -1966,7 +1967,7 @@ async def on_raw_reaction_add(payload):
 @bot.event
 async def on_raw_reaction_remove(payload):
     try:
-        if str(payload.emoji) != "🏆":
+        if str(payload.emoji) != "ðŸ†":
             return
         guild = bot.get_guild(payload.guild_id)
         if not guild:
@@ -1983,7 +1984,7 @@ async def on_raw_reaction_remove(payload):
 async def on_command_error(ctx, error):
     log.warning("Prefix command error: %s", error)
 
-# ── License HTTP API ──────────────────────────────────────────────────
+# â”€â”€ License HTTP API â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 LICENSE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 LICENSE_SECRET  = "M0nSt3rL1c3ns3K3yG3n2024!@#$%"
 
@@ -2063,10 +2064,10 @@ def run_http_server():
                 time.sleep(3)
     log.error("HTTP server could not start after 5 attempts")
 
-# ── License Slash Commands ────────────────────────────────────────────
+# â”€â”€ License Slash Commands â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 @bot.tree.command(name="genkeys", description="[Admin] Generate N license keys")
 async def genkeys(interaction: discord.Interaction, count: int = 1):
-    if interaction.user.id != ADMIN_ID and ADMIN_ROLE_ID not in [r.id for r in interaction.user.roles]:
+    if interaction.user.id != ADMIN_ID and ADMIN_ROLE_ID not in [r.id for r in interaction.user.roles] and ADMIN_ROLE_ID_2 not in [r.id for r in interaction.user.roles]:
         return await interaction.response.send_message("You don't have permission.", ephemeral=True)
     if count < 1 or count > 50:
         return await interaction.response.send_message("Count must be 1-50.", ephemeral=True)
@@ -2083,7 +2084,7 @@ async def genkeys(interaction: discord.Interaction, count: int = 1):
 
 @bot.tree.command(name="addkey", description="[Admin] Register an existing license key")
 async def addkey(interaction: discord.Interaction, key: str):
-    if interaction.user.id != ADMIN_ID and ADMIN_ROLE_ID not in [r.id for r in interaction.user.roles]:
+    if interaction.user.id != ADMIN_ID and ADMIN_ROLE_ID not in [r.id for r in interaction.user.roles] and ADMIN_ROLE_ID_2 not in [r.id for r in interaction.user.roles]:
         return await interaction.response.send_message("You don't have permission.", ephemeral=True)
     key = key.strip().upper()
     if not (key.startswith("MONSTER-") and len(key) == 25):
@@ -2100,7 +2101,7 @@ async def addkey(interaction: discord.Interaction, key: str):
 
 @bot.tree.command(name="listkeys", description="[Admin] List all license keys")
 async def listkeys(interaction: discord.Interaction):
-    if interaction.user.id != ADMIN_ID and ADMIN_ROLE_ID not in [r.id for r in interaction.user.roles]:
+    if interaction.user.id != ADMIN_ID and ADMIN_ROLE_ID not in [r.id for r in interaction.user.roles] and ADMIN_ROLE_ID_2 not in [r.id for r in interaction.user.roles]:
         return await interaction.response.send_message("You don't have permission.", ephemeral=True)
     db = get_db()
     rows = db.execute("SELECT * FROM licenses ORDER BY created_at DESC LIMIT 50").fetchall()
