@@ -208,6 +208,7 @@ rank_message_id = cfg.get("rank_message_id", 1508197095385858120)
 rank_channel_id = cfg.get("rank_channel_id", None)
 rank_role_id = cfg.get("rank_role_id", 1508212570404687932)
 apostado_role_id = cfg.get("apostado_role_id", None)
+apostado_channel_id = cfg.get("apostado_channel_id", 1534172808882556988)
 
 
 _RANK_PREFIX_RE = re.compile(r"^Rank \d+ \| ")
@@ -542,9 +543,9 @@ class KeyModal(discord.ui.Modal, title="Enter Game Key"):
                 return await interaction.response.send_message("This lobby is closed.", ephemeral=True)
             if l.in_lobby(interaction.user.id):
                 return await interaction.response.send_message("You're already in this lobby!", ephemeral=True)
-            role = interaction.guild.get_role(rank_role_id) if interaction.guild else None
+            role = interaction.guild.get_role(apostado_role_id) if interaction.guild else None
             if not role or role not in interaction.user.roles:
-                return await interaction.response.send_message("You need to react with 🏆 in the rank channel first to play!", ephemeral=True)
+                return await interaction.response.send_message("You need to react with 🏆 in the APOSTADO channel first to play!", ephemeral=True)
             team_members = l.team1 if self.team == 1 else l.team2
             if len(team_members) >= l.max_per_team:
                 return await interaction.response.send_message("That team is full!", ephemeral=True)
@@ -613,9 +614,9 @@ class LobbyView(View):
             return await self._ephemeral(i, "This lobby is closed.")
         if l.in_lobby(i.user.id):
             return await self._ephemeral(i, "You're already in this lobby!")
-        role = i.guild.get_role(rank_role_id) if i.guild else None
+        role = i.guild.get_role(apostado_role_id) if i.guild else None
         if not role or role not in i.user.roles:
-            return await self._ephemeral(i, "You need to react with 🏆 in the rank channel first to play!")
+            return await self._ephemeral(i, "You need to react with 🏆 in the APOSTADO channel first to play!")
         team_members = l.team1 if team == 1 else l.team2
         if len(team_members) >= l.max_per_team:
             return await self._ephemeral(i, "That team is full!")
@@ -1037,9 +1038,9 @@ class GameModal(discord.ui.Modal, title="Game Credentials"):
         try:
             if not self.match_id.value.isdigit() or not self.password.value.isdigit():
                 return await interaction.response.send_message("Match ID and Password must be numbers only!", ephemeral=True)
-            role = interaction.guild.get_role(rank_role_id) if interaction.guild else None
+            role = interaction.guild.get_role(apostado_role_id) if interaction.guild else None
             if not role or role not in interaction.user.roles:
-                return await interaction.response.send_message("You need to react with 🏆 in the rank channel first to play!", ephemeral=True)
+                return await interaction.response.send_message("You need to react with 🏆 in the APOSTADO channel first to play!", ephemeral=True)
             for l in list(lobbies.values()):
                 if l.creator.id == interaction.user.id and (l.active or l.started):
                     return await interaction.response.send_message("You already have a lobby/game running! Use /stop to end it.", ephemeral=True)
@@ -1398,6 +1399,36 @@ async def cmd_setrankchannel(interaction: discord.Interaction, channel: discord.
         log.error("setrankchannel error: %s", e)
 
 
+@bot.tree.command(name="setapostadochannel", description="Set the channel where APOSTADO reactions are tracked")
+async def cmd_setapostadochannel(interaction: discord.Interaction, channel: discord.TextChannel):
+    try:
+        global apostado_role_id
+        if not admin_check(interaction):
+            return await interaction.response.send_message("Only admin.", ephemeral=True)
+        await interaction.response.defer(ephemeral=True)
+        cfg = load_config()
+        cfg["apostado_channel_id"] = channel.id
+        save_config(cfg)
+        msg = None
+        try:
+            async for m in channel.history(limit=50):
+                react = discord.utils.get(m.reactions, emoji="🏆")
+                if react:
+                    msg = m
+                    break
+        except:
+            pass
+        if msg:
+            await msg.add_reaction("🏆")
+            await interaction.followup.send(f"✅ APOSTADO channel set to {channel.mention}. Found existing 🏆 message. Use /refreshratings to sync roles.", ephemeral=True)
+        else:
+            msg = await channel.send("React with 🏆 to get the **APOSTADO PLAYER** role and access the bot!")
+            await msg.add_reaction("🏆")
+            await interaction.followup.send(f"✅ APOSTADO channel set to {channel.mention}. Created new reaction message.", ephemeral=True)
+    except Exception as e:
+        log.error("setapostadochannel error: %s", e)
+
+
 @bot.tree.command(name="addpoints", description="Add or remove points from a player")
 async def cmd_addpoints(interaction: discord.Interaction, member: discord.Member, amount: int):
     try:
@@ -1692,6 +1723,71 @@ async def ensure_get_rank_channel(guild):
         return None
 
 
+async def ensure_apostado_role(guild):
+    global apostado_role_id
+    try:
+        role = guild.get_role(apostado_role_id)
+        if not role:
+            role = discord.utils.get(guild.roles, name=APOSTADO_ROLE_NAME)
+        if not role:
+            bot_member = guild.get_member(bot.user.id) if bot.user else None
+            if bot_member and bot_member.guild_permissions.manage_roles:
+                role = await guild.create_role(name=APOSTADO_ROLE_NAME, reason="Auto-created APOSTADO PLAYER role")
+            else:
+                log.warning("Missing manage_roles permission in %s", guild.name)
+                return None
+        if role.id != apostado_role_id:
+            apostado_role_id = role.id
+            c = load_config()
+            c["apostado_role_id"] = role.id
+            save_config(c)
+        return role
+    except discord.Forbidden:
+        log.warning("Forbidden to create/manage APOSTADO role in %s", guild.name)
+        return None
+    except Exception as e:
+        log.error("ensure_apostado_role error in %s: %s", guild.name, e)
+        return None
+
+
+async def _handle_apostado_reaction(guild, user_id, add):
+    try:
+        if not guild or user_id == (bot.user.id if bot.user else None):
+            return
+        member = guild.get_member(user_id)
+        if not member:
+            try:
+                member = await guild.fetch_member(user_id)
+            except:
+                return
+        if not member or member.bot:
+            return
+        role = guild.get_role(apostado_role_id)
+        if not role:
+            return
+        bot_member = guild.get_member(bot.user.id) if bot.user else None
+        if bot_member and role.position >= bot_member.top_role.position:
+            log.warning("APOSTADO role is above bot's top role in %s", guild.name)
+            return
+        if add:
+            ok = await safe_add_role(member, role)
+            if not ok:
+                log.warning("Failed to add APOSTADO role to %s in %s", member.id, guild.name)
+        else:
+            ok = await safe_remove_role(member, role)
+            if not ok:
+                log.warning("Failed to remove APOSTADO role from %s in %s", member.id, guild.name)
+    except Exception as e:
+        log.error("_handle_apostado_reaction error: %s", e)
+
+
+def _is_apostado_channel(guild, channel_id):
+    ch = guild.get_channel(channel_id)
+    if not ch:
+        return False
+    return channel_id == apostado_channel_id
+
+
 async def _handle_rank_reaction(guild, user_id, add):
     try:
         if not guild or user_id == (bot.user.id if bot.user else None):
@@ -1750,6 +1846,7 @@ async def maintenance_loop():
                 try:
                     await ensure_rank_role(guild)
                     await ensure_get_rank_channel(guild)
+                    await ensure_apostado_role(guild)
                 except Exception as e:
                     log.error("maintenance ensure error in %s: %s", guild.name, e)
                 _spawn(recalculate_all_ranks(guild))
@@ -1773,6 +1870,7 @@ async def on_ready():
     for guild in bot.guilds:
         await ensure_rank_role(guild)
         await ensure_get_rank_channel(guild)
+        await ensure_apostado_role(guild)
         try:
             bot.tree.copy_global_to(guild=guild)
             await bot.tree.sync(guild=guild)
@@ -1790,6 +1888,7 @@ async def on_guild_join(guild):
     try:
         await ensure_rank_role(guild)
         await ensure_get_rank_channel(guild)
+        await ensure_apostado_role(guild)
         try:
             bot.tree.copy_global_to(guild=guild)
             await bot.tree.sync(guild=guild)
@@ -1843,9 +1942,12 @@ async def on_raw_reaction_add(payload):
         if str(payload.emoji) != "🏆":
             return
         guild = bot.get_guild(payload.guild_id)
-        if not guild or not _is_rank_channel(guild, payload.channel_id):
+        if not guild:
             return
-        await _handle_rank_reaction(guild, payload.user_id, True)
+        if _is_rank_channel(guild, payload.channel_id):
+            await _handle_rank_reaction(guild, payload.user_id, True)
+        elif _is_apostado_channel(guild, payload.channel_id):
+            await _handle_apostado_reaction(guild, payload.user_id, True)
     except Exception as e:
         log.error("on_raw_reaction_add error: %s", e)
 
@@ -1856,9 +1958,12 @@ async def on_raw_reaction_remove(payload):
         if str(payload.emoji) != "🏆":
             return
         guild = bot.get_guild(payload.guild_id)
-        if not guild or not _is_rank_channel(guild, payload.channel_id):
+        if not guild:
             return
-        await _handle_rank_reaction(guild, payload.user_id, False)
+        if _is_rank_channel(guild, payload.channel_id):
+            await _handle_rank_reaction(guild, payload.user_id, False)
+        elif _is_apostado_channel(guild, payload.channel_id):
+            await _handle_apostado_reaction(guild, payload.user_id, False)
     except Exception as e:
         log.error("on_raw_reaction_remove error: %s", e)
 
