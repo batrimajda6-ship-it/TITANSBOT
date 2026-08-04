@@ -1,7 +1,7 @@
 import discord
 from discord.ext import commands
 from discord.ui import View, Button
-import datetime, os, asyncio, json, threading, random, logging, shutil, sqlite3, hashlib, hmac, sys, time
+import datetime, os, asyncio, json, threading, random, logging, shutil, sqlite3, hashlib, hmac, sys, time, re
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse
 
@@ -28,6 +28,7 @@ CONFIG_FILE = os.path.join(DATA_DIR, "config.json")
 ROLE_NAME = "rank"
 
 CONFIG_LOCK = threading.Lock()
+SCORE_LOCK = threading.Lock()
 
 COOLDOWN_DEFAULT = 3
 COOLDOWN_ADMIN = 1
@@ -111,6 +112,9 @@ def load_scores():
 
 def save_scores(data):
     try:
+        global _score_cache, _score_cache_time
+        _score_cache = {}
+        _score_cache_time = 0
         db = get_db()
         for gid, users in data.items():
             for uid, u in users.items():
@@ -126,6 +130,14 @@ def save_scores(data):
         db.close()
     except Exception as e:
         log.error("save_scores error: %s", e)
+
+def update_scores(guild_id, mutator):
+    with SCORE_LOCK:
+        data = load_scores()
+        g = data.setdefault(str(guild_id), {})
+        mutator(g)
+        save_scores(data)
+    return g
 
 def get_user_data(guild_id, user_id, username):
     try:
@@ -181,20 +193,41 @@ rank_channel_id = cfg.get("rank_channel_id", None)
 rank_role_id = cfg.get("rank_role_id", 1508212570404687932)
 
 
+_RANK_PREFIX_RE = re.compile(r"^Rank \d+ \| ")
+
+def strip_rank_prefix(name):
+    return _RANK_PREFIX_RE.sub("", name, count=1)
+
+def build_rank_nick(rank_pos, current_name):
+    prefix = f"Rank {rank_pos} | "
+    base = strip_rank_prefix(current_name)
+    if len(base) > 32 - len(prefix):
+        base = base[:max(0, 32 - len(prefix))]
+    return f"{prefix}{base}"
+
+
+_nick_editing: set = set()
+
 async def safe_nick_edit(member, new_nick, retries=2):
-    for attempt in range(retries + 1):
-        try:
-            if member.display_name != new_nick:
-                await member.edit(nick=new_nick)
-            return True
-        except discord.Forbidden:
-            return False
-        except discord.HTTPException as e:
-            if e.status == 429 and attempt < retries:
-                await asyncio.sleep(2 ** attempt + random.uniform(0, 1))
-                continue
-            return False
-    return False
+    if member.id in _nick_editing:
+        return True
+    _nick_editing.add(member.id)
+    try:
+        for attempt in range(retries + 1):
+            try:
+                if member.display_name != new_nick:
+                    await member.edit(nick=new_nick)
+                return True
+            except discord.Forbidden:
+                return False
+            except discord.HTTPException as e:
+                if e.status == 429 and attempt < retries:
+                    await asyncio.sleep(2 ** attempt + random.uniform(0, 1))
+                    continue
+                return False
+        return False
+    finally:
+        _nick_editing.discard(member.id)
 
 async def safe_add_role(member, role, retries=2):
     for attempt in range(retries + 1):
@@ -268,47 +301,65 @@ def progress_bar(filled, total, size=10):
     return "\U0001f7e6" * f + "\u2b1c" * (size - f)
 
 
+def compute_rankings(guild, data):
+    g = data.get(str(guild.id), {})
+    bot_member = guild.get_member(bot.user.id) if bot.user else None
+    members = [m for m in guild.members if m != bot_member and m.roles and any(ROLE_NAME in r.name for r in m.roles)]
+    players = []
+    for m in members:
+        pts = g.get(str(m.id), {}).get("points", 0)
+        players.append((m, pts))
+    players.sort(key=lambda x: (-x[1], x[0].id))
+    return players
+
+
+_background_tasks: set = set()
+
+def _spawn(coro):
+    task = asyncio.create_task(coro)
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+    return task
+
+_recalc_locks: dict = {}
+_maintenance_started = False
+
+
 async def recalculate_all_ranks(guild):
-    try:
-        data = load_scores()
-        g = data.get(str(guild.id), {})
-        bot_member = guild.get_member(bot.user.id) if bot.user else None
-        if not bot_member:
-            return
-        members = [m for m in guild.members if m != bot_member and m.roles and any(ROLE_NAME in r.name for r in m.roles)]
-        if not members:
-            return
-        scored = []
-        for m in members:
-            pts = g.get(str(m.id), {}).get("points", None)
-            if pts is not None:
-                scored.append((m, pts))
-        zero_pts = [(m, 0) for m in members if str(m.id) not in g]
-        all_players = sorted(scored + zero_pts, key=lambda x: (-x[1], x[0].id))
-        changed = 0
-        tasks = []
-        for pos, (m, pts) in enumerate(all_players, 1):
-            if not bot_member or m.top_role >= bot_member.top_role:
-                continue
-            prefix = f"Rank {pos} | "
-            base = m.display_name
-            if " | " in base:
-                base = base.rsplit(" | ", 1)[-1]
-            new_nick = f"{prefix}{base}"
-            if m.display_name != new_nick:
-                tasks.append((m, new_nick))
-        if tasks:
-            batch_size = 5
-            for i in range(0, len(tasks), batch_size):
-                batch = tasks[i:i+batch_size]
-                results = await asyncio.gather(*[safe_nick_edit(m, n) for m, n in batch], return_exceptions=True)
-                changed += sum(1 for r in results if r is True)
-                if i + batch_size < len(tasks):
-                    await asyncio.sleep(0.3)
-        if changed:
-            log.info("Updated %d/%d nicknames in %s", changed, len(all_players), guild.name)
-    except Exception as e:
-        log.error("recalculate_all_ranks error in %s: %s", guild.name if guild else "?", e)
+    if not guild:
+        return
+    lock = _recalc_locks.setdefault(guild.id, asyncio.Lock())
+    if lock.locked():
+        return
+    async with lock:
+        try:
+            data = load_scores()
+            bot_member = guild.get_member(bot.user.id) if bot.user else None
+            if not bot_member:
+                return
+            all_players = compute_rankings(guild, data)
+            if not all_players:
+                return
+            changed = 0
+            tasks = []
+            for pos, (m, pts) in enumerate(all_players, 1):
+                if not bot_member or m.top_role >= bot_member.top_role:
+                    continue
+                new_nick = build_rank_nick(pos, m.display_name)
+                if m.display_name != new_nick:
+                    tasks.append((m, new_nick))
+            if tasks:
+                batch_size = 5
+                for i in range(0, len(tasks), batch_size):
+                    batch = tasks[i:i+batch_size]
+                    results = await asyncio.gather(*[safe_nick_edit(m, n) for m, n in batch], return_exceptions=True)
+                    changed += sum(1 for r in results if r is True)
+                    if i + batch_size < len(tasks):
+                        await asyncio.sleep(0.3)
+            if changed:
+                log.info("Updated %d/%d nicknames in %s", changed, len(all_players), guild.name)
+        except Exception as e:
+            log.error("recalculate_all_ranks error in %s: %s", guild.name if guild else "?", e)
 
 
 class Lobby:
@@ -824,32 +875,41 @@ class PostGameView(View):
 
             gid = str(i.guild_id)
             wp = [m.id for m in win_team]
-            lp = [m.id for m in lose_team]
             tracked = [m for m in lobby.team1 + lobby.team2 if m.roles and any(ROLE_NAME in r.name for r in m.roles)]
-            data = load_scores()
-            g = data.setdefault(gid, {})
-            for m in tracked:
-                u = g.setdefault(str(m.id), {"name": m.name, "points": 0, "wins": 0, "losses": 0, "mvp_wins": 0, "mvp_losses": 0})
-                u["name"] = m.name
-                if m.id in wp:
-                    u["points"] += 5
-                    u["wins"] += 1
-                else:
-                    u["losses"] += 1
-            for mid, pts, key in [(win_mvp.id, 5, "mvp_wins"), (lose_mvp.id, 2, "mvp_losses")]:
-                name = win_mvp.name if mid == win_mvp.id else lose_mvp.name
-                u = g.setdefault(str(mid), {"name": name, "points": 0, "wins": 0, "losses": 0, "mvp_wins": 0, "mvp_losses": 0})
-                u["points"] += pts
-                u[key] += 1
-            save_scores(data)
-            asyncio.create_task(recalculate_all_ranks(i.guild))
+            tracked_ids = {m.id for m in tracked}
+
+            def _apply(g):
+                for m in tracked:
+                    u = g.setdefault(str(m.id), {"name": m.name, "points": 0, "wins": 0, "losses": 0, "mvp_wins": 0, "mvp_losses": 0})
+                    u["name"] = m.name
+                    if m.id in wp:
+                        u["points"] += 5
+                        u["wins"] += 1
+                    else:
+                        u["losses"] += 1
+                for mid, pts, key in [(win_mvp.id, 5, "mvp_wins"), (lose_mvp.id, 2, "mvp_losses")]:
+                    if mid not in tracked_ids:
+                        continue
+                    name = win_mvp.name if mid == win_mvp.id else lose_mvp.name
+                    u = g.setdefault(str(mid), {"name": name, "points": 0, "wins": 0, "losses": 0, "mvp_wins": 0, "mvp_losses": 0})
+                    u["points"] += pts
+                    u[key] += 1
+
+            update_scores(gid, _apply)
+            _spawn(recalculate_all_ranks(i.guild))
+
+            def team_line(team):
+                return "\n".join(f"{m.mention} {'\u2705' if m.id in tracked_ids else '\u274c'}" for m in team)
+
+            win_mvp_txt = win_mvp.mention if win_mvp.id in tracked_ids else f"{win_mvp.mention} (no rank role)"
+            lose_mvp_txt = lose_mvp.mention if lose_mvp.id in tracked_ids else f"{lose_mvp.mention} (no rank role)"
 
             embed = discord.Embed(title=f"\U0001f3c6 {win_label} WINS!", color=0xFFD700)
-            embed.add_field(name=f"{we} {win_label} (+5 each)", value="\n".join(f"{m.mention} \u2705" for m in win_team), inline=True)
-            embed.add_field(name=f"{le} {lose_label}", value="\n".join(f"{m.mention}" for m in lose_team), inline=True)
+            embed.add_field(name=f"{we} {win_label} (+5 each)", value=team_line(win_team), inline=True)
+            embed.add_field(name=f"{le} {lose_label}", value=team_line(lose_team), inline=True)
             embed.add_field(name="\u200b", value="\u200b", inline=True)
-            embed.add_field(name=f"\u2b50 {win_label} MVP (+5 bonus)", value=win_mvp.mention, inline=True)
-            embed.add_field(name=f"\U0001f4aa {lose_label} MVP (+2)", value=lose_mvp.mention, inline=True)
+            embed.add_field(name=f"\u2b50 {win_label} MVP (+5 bonus)", value=win_mvp_txt, inline=True)
+            embed.add_field(name=f"\U0001f4aa {lose_label} MVP (+2)", value=lose_mvp_txt, inline=True)
             embed.add_field(name="\u200b", value="\u200b", inline=True)
             embed.set_footer(text="\u2705 Points updated!")
             try:
@@ -1083,9 +1143,8 @@ async def cmd_rank(interaction: discord.Interaction, member: discord.Member = No
         if not target.roles or not any(ROLE_NAME in r.name for r in target.roles):
             return await interaction.response.send_message("This member doesn't have the rank role.", ephemeral=True)
         data, u = get_user_data(interaction.guild_id, target.id, target.name)
-        g = data.get(str(interaction.guild_id), {})
-        sorted_ids = sorted(g, key=lambda uid: g[uid]["points"], reverse=True)
-        rank_pos = next((i+1 for i, uid in enumerate(sorted_ids) if uid == str(target.id)), "?")
+        players = compute_rankings(interaction.guild, data)
+        rank_pos = next((i + 1 for i, (m, pts) in enumerate(players) if m.id == target.id), "?")
         embed = discord.Embed(title=f"Rank #{rank_pos} - {target.name}", color=discord.Color.gold())
         embed.add_field(name="Points", value=str(u["points"]), inline=True)
         embed.add_field(name="Wins", value=str(u["wins"]), inline=True)
@@ -1328,13 +1387,16 @@ async def cmd_addpoints(interaction: discord.Interaction, member: discord.Member
         if not admin_check(interaction):
             return await interaction.response.send_message("Only admins can use this.", ephemeral=True)
         await interaction.response.defer(ephemeral=True)
-        data, u = get_user_data(interaction.guild_id, member.id, member.name)
-        u["points"] += amount
-        save_scores(data)
+        def _apply(g):
+            u = g.setdefault(str(member.id), {"name": member.name, "points": 0, "wins": 0, "losses": 0, "mvp_wins": 0, "mvp_losses": 0})
+            u["name"] = member.name
+            u["points"] += amount
+        g = update_scores(interaction.guild_id, _apply)
+        total = g.get(str(member.id), {}).get("points", 0)
         guild = interaction.guild
         if guild:
             await recalculate_all_ranks(guild)
-        await interaction.followup.send(f"{'+' if amount >= 0 else ''}{amount} points for {member.mention}. Total: {u['points']}", ephemeral=True)
+        await interaction.followup.send(f"{'+' if amount >= 0 else ''}{amount} points for {member.mention}. Total: {total}", ephemeral=True)
     except Exception as e:
         log.error("addpoints error: %s", e)
 
@@ -1537,7 +1599,7 @@ async def cmd_restore(interaction: discord.Interaction, attachment: discord.Atta
             return await interaction.response.send_message("Invalid format.", ephemeral=True)
         save_scores(data)
         for guild in bot.guilds:
-            asyncio.create_task(recalculate_all_ranks(guild))
+            _spawn(recalculate_all_ranks(guild))
         player_count = sum(len(g) for g in data.values()) if data else 0
         await interaction.response.send_message(f"✅ Restored scores for {player_count} players! Nicknames being refreshed.", ephemeral=True)
     except Exception as e:
@@ -1641,12 +1703,10 @@ async def _handle_rank_reaction(guild, user_id, add):
             if not ok:
                 log.warning("Failed to remove rank role from %s in %s", member.id, guild.name)
             if ok:
-                base = member.display_name
-                if " | " in base:
-                    base = base.rsplit(" | ", 1)[-1]
-                    if member.display_name != base and bot_member and member.top_role < bot_member.top_role:
-                        await safe_nick_edit(member, base)
-        asyncio.create_task(recalculate_all_ranks(guild))
+                base = strip_rank_prefix(member.display_name)
+                if member.display_name != base and bot_member and member.top_role < bot_member.top_role:
+                    await safe_nick_edit(member, base)
+        _spawn(recalculate_all_ranks(guild))
     except Exception as e:
         log.error("_handle_rank_reaction error: %s", e)
 
@@ -1663,8 +1723,28 @@ def _is_rank_channel(guild, channel_id):
     return False
 
 
+MAINTENANCE_INTERVAL = 900
+
+async def maintenance_loop():
+    try:
+        while not bot.is_closed():
+            await asyncio.sleep(MAINTENANCE_INTERVAL)
+            for guild in list(bot.guilds):
+                try:
+                    await ensure_rank_role(guild)
+                    await ensure_get_rank_channel(guild)
+                except Exception as e:
+                    log.error("maintenance ensure error in %s: %s", guild.name, e)
+                _spawn(recalculate_all_ranks(guild))
+    except asyncio.CancelledError:
+        pass
+    except Exception as e:
+        log.error("maintenance loop error: %s", e)
+
+
 @bot.event
 async def on_ready():
+    global _maintenance_started
     log.info("%s is online! (%d guilds)", bot.user, len(bot.guilds))
     for g in bot.guilds:
         log.info("  - %s (%s)", g.name, g.id)
@@ -1681,7 +1761,50 @@ async def on_ready():
             await bot.tree.sync(guild=guild)
         except Exception as e:
             log.error("sync failed for %s: %s", guild.name, e)
+        _spawn(recalculate_all_ranks(guild))
+    if not _maintenance_started:
+        _maintenance_started = True
+        _spawn(maintenance_loop())
     log.info("Commands synced to all guilds")
+
+
+@bot.event
+async def on_guild_join(guild):
+    try:
+        await ensure_rank_role(guild)
+        await ensure_get_rank_channel(guild)
+        try:
+            bot.tree.copy_global_to(guild=guild)
+            await bot.tree.sync(guild=guild)
+        except Exception as e:
+            log.error("on_guild_join sync error in %s: %s", guild.name, e)
+        _spawn(recalculate_all_ranks(guild))
+    except Exception as e:
+        log.error("on_guild_join error in %s: %s", guild.name, e)
+
+
+@bot.event
+async def on_member_update(before, after):
+    try:
+        if after.bot or not after.guild:
+            return
+        if not after.roles or not any(ROLE_NAME in r.name for r in after.roles):
+            return
+        if before.display_name == after.display_name:
+            return
+        bot_member = after.guild.get_member(bot.user.id) if bot.user else None
+        if not bot_member or after.top_role >= bot_member.top_role:
+            return
+        data = load_scores()
+        players = compute_rankings(after.guild, data)
+        for pos, (m, pts) in enumerate(players, 1):
+            if m.id == after.id:
+                new_nick = build_rank_nick(pos, after.display_name)
+                if after.display_name != new_nick:
+                    await safe_nick_edit(after, new_nick)
+                break
+    except Exception as e:
+        log.error("on_member_update error: %s", e)
 
 
 @bot.tree.command(name="sync", description="[Admin] Force resync all slash commands")
@@ -1695,6 +1818,9 @@ async def cmd_sync(interaction: discord.Interaction):
     except Exception as e:
         log.error("sync command error: %s", e)
         await interaction.followup.send(f"Sync failed: {e}", ephemeral=True)
+
+
+@bot.event
 async def on_raw_reaction_add(payload):
     try:
         if str(payload.emoji) != "🏆":
