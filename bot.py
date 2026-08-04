@@ -916,8 +916,10 @@ class PostGameView(View):
             update_scores(gid, _apply)
             _spawn(recalculate_all_ranks(i.guild))
 
+            check = "\u2705"
+            cross = "\u274c"
             def team_line(team):
-                return "\n".join(f"{m.mention} {'\u2705' if m.id in tracked_ids else '\u274c'}" for m in team)
+                return "\n".join(f"{m.mention} {check if m.id in tracked_ids else cross}" for m in team)
 
             win_mvp_txt = win_mvp.mention if win_mvp.id in tracked_ids else f"{win_mvp.mention} (no rank role)"
             lose_mvp_txt = lose_mvp.mention if lose_mvp.id in tracked_ids else f"{lose_mvp.mention} (no rank role)"
