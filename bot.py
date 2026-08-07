@@ -1886,12 +1886,12 @@ MAINTENANCE_INTERVAL = 900
 async def ensure_stay_voice():
     if not stay_vc_id:
         return
-    for guild in bot.guilds:
-        vc = guild.get_channel(stay_vc_id)
-        if not vc:
-            continue
-        client = guild.voice_client
-        try:
+    try:
+        for guild in bot.guilds:
+            vc = guild.get_channel(stay_vc_id)
+            if not vc:
+                continue
+            client = guild.voice_client
             if client and client.channel and client.channel.id == stay_vc_id:
                 return
             if client:
@@ -1900,8 +1900,8 @@ async def ensure_stay_voice():
                 await vc.connect()
             log.info("Connected to voice channel %s in %s", vc.name, guild.name)
             return
-        except (discord.Forbidden, discord.HTTPException, discord.opus.NotConnected) as e:
-            log.warning("Failed to join voice channel %s: %s", stay_vc_id, e)
+    except Exception as e:
+        log.warning("ensure_stay_voice error: %s", e)
 
 
 @bot.event
