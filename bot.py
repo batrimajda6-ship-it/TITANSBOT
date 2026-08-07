@@ -5,6 +5,11 @@ import datetime, os, asyncio, json, threading, random, logging, shutil, sqlite3,
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse
 
+try:
+    import yt_dlp
+except ImportError:
+    yt_dlp = None
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(message)s',
@@ -211,6 +216,7 @@ rank_role_id = cfg.get("rank_role_id", 1508212570404687932)
 apostado_role_id = cfg.get("apostado_role_id", None)
 apostado_channel_id = cfg.get("apostado_channel_id", 1534172808882556988)
 stay_vc_id = cfg.get("stay_vc_id", 1535125369949134848)
+stay_music_url = cfg.get("stay_music_url", "https://www.youtube.com/watch?v=gIYaTs1Kw90")
 
 
 _RANK_PREFIX_RE = re.compile(r"^Rank \d+ \| ")
@@ -1883,6 +1889,44 @@ def _is_rank_channel(guild, channel_id):
 
 MAINTENANCE_INTERVAL = 900
 
+_music_lock = asyncio.Lock()
+
+def get_audio_source(url):
+    if yt_dlp is None:
+        raise RuntimeError("yt-dlp is not installed")
+    ydl_opts = {"format": "bestaudio/best", "quiet": True, "noplaylist": True}
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(url, download=False)
+        stream_url = info.get("url") or info.get("webpage_url")
+    return discord.FFmpegPCMAudio(
+        stream_url,
+        before_options="-stream_loop -1 -reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5",
+    )
+
+async def start_stay_music(client):
+    if not stay_music_url:
+        return
+    async with _music_lock:
+        if client.is_playing():
+            return
+        loop = asyncio.get_running_loop()
+        def _after(err):
+            if err:
+                log.error("Playback ended with error: %s", err)
+            def _restart():
+                asyncio.create_task(start_stay_music(client))
+            loop.call_soon_threadsafe(_restart)
+        try:
+            source = await loop.run_in_executor(None, get_audio_source, stay_music_url)
+        except Exception as e:
+            log.error("Failed to fetch music source: %s", e)
+            return
+        try:
+            client.play(source, after=_after)
+            log.info("Now playing %s in %s", stay_music_url, client.channel)
+        except Exception as e:
+            log.error("Music play error: %s", e)
+
 async def ensure_stay_voice():
     if not stay_vc_id:
         return
@@ -1892,13 +1936,13 @@ async def ensure_stay_voice():
             if not vc:
                 continue
             client = guild.voice_client
-            if client and client.channel and client.channel.id == stay_vc_id:
-                return
+            if not (client and client.channel and client.channel.id == stay_vc_id):
+                if client:
+                    await client.move_to(vc)
+                else:
+                    client = await vc.connect()
             if client:
-                await client.move_to(vc)
-            else:
-                await vc.connect()
-            log.info("Connected to voice channel %s in %s", vc.name, guild.name)
+                await start_stay_music(client)
             return
     except Exception as e:
         log.warning("ensure_stay_voice error: %s", e)
