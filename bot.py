@@ -348,8 +348,6 @@ async def recalculate_all_ranks(guild):
     if not guild:
         return
     lock = _recalc_locks.setdefault(guild.id, asyncio.Lock())
-    if lock.locked():
-        return
     async with lock:
         try:
             data = load_scores()
@@ -1184,14 +1182,15 @@ async def cmd_rank(interaction: discord.Interaction, member: discord.Member = No
 @bot.tree.command(name="leaderboard", description="Show the server leaderboard")
 async def cmd_lb(interaction: discord.Interaction):
     try:
+        guild = interaction.guild
         data = load_scores()
-        g = data.get(str(interaction.guild_id), {})
-        if not g:
+        players = compute_rankings(guild, data)
+        if not players:
             return await interaction.response.send_message("No scores yet!")
-        sorted_players = sorted(g.items(), key=lambda x: x[1]["points"], reverse=True)[:10]
         desc = ""
-        for i, (uid, u) in enumerate(sorted_players, 1):
-            desc += f"{i}. <@{uid}> - {u['points']} pts ({u['wins']}W/{u['losses']}L)\n"
+        for i, (m, pts) in enumerate(players[:10], 1):
+            u = data.get(str(guild.id), {}).get(str(m.id), {})
+            desc += f"{i}. {m.mention} - {pts} pts ({u.get('wins', 0)}W/{u.get('losses', 0)}L)\n"
         embed = discord.Embed(title="Leaderboard", description=desc, color=discord.Color.gold())
         await interaction.response.send_message(embed=embed)
     except Exception as e:
