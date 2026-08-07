@@ -210,6 +210,7 @@ rank_channel_id = cfg.get("rank_channel_id", None)
 rank_role_id = cfg.get("rank_role_id", 1508212570404687932)
 apostado_role_id = cfg.get("apostado_role_id", None)
 apostado_channel_id = cfg.get("apostado_channel_id", 1534172808882556988)
+stay_vc_id = cfg.get("stay_vc_id", 1535125369949134848)
 
 
 _RANK_PREFIX_RE = re.compile(r"^Rank \d+ \| ")
@@ -1882,10 +1883,44 @@ def _is_rank_channel(guild, channel_id):
 
 MAINTENANCE_INTERVAL = 900
 
+async def ensure_stay_voice():
+    if not stay_vc_id:
+        return
+    for guild in bot.guilds:
+        vc = guild.get_channel(stay_vc_id)
+        if not vc:
+            continue
+        client = guild.voice_client
+        try:
+            if client and client.channel and client.channel.id == stay_vc_id:
+                return
+            if client:
+                await client.move_to(vc)
+            else:
+                await vc.connect()
+            log.info("Connected to voice channel %s in %s", vc.name, guild.name)
+            return
+        except (discord.Forbidden, discord.HTTPException, discord.opus.NotConnected) as e:
+            log.warning("Failed to join voice channel %s: %s", stay_vc_id, e)
+
+
+@bot.event
+async def on_voice_state_update(member, before, after):
+    try:
+        if member.id != (bot.user.id if bot.user else None):
+            return
+        if after.channel and after.channel.id == stay_vc_id:
+            return
+        await ensure_stay_voice()
+    except Exception as e:
+        log.error("on_voice_state_update error: %s", e)
+
+
 async def maintenance_loop():
     try:
         while not bot.is_closed():
             await asyncio.sleep(MAINTENANCE_INTERVAL)
+            await ensure_stay_voice()
             for guild in list(bot.guilds):
                 try:
                     await ensure_rank_role(guild)
@@ -1921,6 +1956,7 @@ async def on_ready():
         except Exception as e:
             log.error("sync failed for %s: %s", guild.name, e)
         _spawn(recalculate_all_ranks(guild))
+    await ensure_stay_voice()
     if not _maintenance_started:
         _maintenance_started = True
         _spawn(maintenance_loop())
