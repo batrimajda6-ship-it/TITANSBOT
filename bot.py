@@ -1631,11 +1631,6 @@ async def prefix_4v4(ctx):
     await _send_prefix_mode(ctx, "4v4")
 
 
-@bot.command(name="4v4")
-async def prefix_4v4(ctx):
-    await _send_prefix_mode(ctx, "4v4")
-
-
 @bot.tree.command(name="admin", description="Admin panel (hidden)")
 async def cmd_admin(interaction: discord.Interaction):
     try:
