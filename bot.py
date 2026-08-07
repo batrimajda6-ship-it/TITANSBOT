@@ -1565,13 +1565,16 @@ class AdminActionView(View):
 
 
 class ModeSelect(discord.ui.Select):
-    def __init__(self):
+    def __init__(self, default=None):
         options = [
             discord.SelectOption(label="1v1", description="Create a 1v1 lobby", emoji="⚔️"),
             discord.SelectOption(label="2v2", description="Create a 2v2 lobby", emoji="⚔️"),
             discord.SelectOption(label="3v3", description="Create a 3v3 lobby", emoji="⚔️"),
             discord.SelectOption(label="4v4", description="Create a 4v4 lobby", emoji="⚔️"),
         ]
+        for o in options:
+            if o.value == default:
+                o.default = True
         super().__init__(placeholder="Choose a game mode...", min_values=1, max_values=1, options=options)
 
     async def callback(self, interaction: discord.Interaction):
@@ -1581,9 +1584,9 @@ class ModeSelect(discord.ui.Select):
             log.error("ModeSelect error: %s", e)
 
 class ModeView(View):
-    def __init__(self):
+    def __init__(self, default=None):
         super().__init__(timeout=60)
-        self.add_item(ModeSelect())
+        self.add_item(ModeSelect(default))
 
 
 @bot.tree.command(name="play", description="Create a lobby (1v1, 2v2, 3v3, 4v4)")
@@ -1600,6 +1603,38 @@ async def prefix_play(ctx):
         await ctx.send("Select a game mode:", view=ModeView())
     except Exception as e:
         log.error("!play error: %s", e)
+
+
+async def _send_prefix_mode(ctx, mode):
+    try:
+        await ctx.send(f"Select a game mode ({mode} preselected):", view=ModeView(mode))
+    except Exception as e:
+        log.error("!%s error: %s", mode, e)
+
+
+@bot.command(name="1v1")
+async def prefix_1v1(ctx):
+    await _send_prefix_mode(ctx, "1v1")
+
+
+@bot.command(name="2v2")
+async def prefix_2v2(ctx):
+    await _send_prefix_mode(ctx, "2v2")
+
+
+@bot.command(name="3v3")
+async def prefix_3v3(ctx):
+    await _send_prefix_mode(ctx, "3v3")
+
+
+@bot.command(name="4v4")
+async def prefix_4v4(ctx):
+    await _send_prefix_mode(ctx, "4v4")
+
+
+@bot.command(name="4v4")
+async def prefix_4v4(ctx):
+    await _send_prefix_mode(ctx, "4v4")
 
 
 @bot.tree.command(name="admin", description="Admin panel (hidden)")
@@ -1976,6 +2011,46 @@ async def on_raw_reaction_remove(payload):
 @bot.event
 async def on_command_error(ctx, error):
     log.warning("Prefix command error: %s", error)
+
+
+DISCORD_LINK_RE = re.compile(
+    r"(?:https?://)?(?:www\.)?"
+    r"(?:discord\.(?:gg|com|me|li|io)/|discordapp\.com/(?:invite/)?|invite\.gg/|dsc\.gg/|discord\.link/)"
+    r"[a-zA-Z0-9_-]+",
+    re.IGNORECASE,
+)
+
+@bot.event
+async def on_message(message):
+    try:
+        if not message.guild or message.author.bot:
+            return
+        if not message.content:
+            return
+        if not DISCORD_LINK_RE.search(message.content):
+            return
+        guild = message.guild
+        bot_member = guild.get_member(bot.user.id) if bot.user else None
+        member = guild.get_member(message.author.id)
+        if member and bot_member and member.top_role >= bot_member.top_role:
+            log.warning("Cannot ban %s (role too high) for invite link in %s", message.author, guild.name)
+            return
+        try:
+            await message.delete()
+        except (discord.Forbidden, discord.NotFound, discord.HTTPException):
+            pass
+        try:
+            await message.author.ban(reason=f"Sent a Discord server link: {message.content[:200]}")
+            log.info("Banned %s (%s) for sending a Discord invite in %s", message.author, message.author.id, guild.name)
+        except discord.Forbidden:
+            log.warning("Missing ban permission in %s", guild.name)
+        except discord.HTTPException as e:
+            log.error("Ban failed for %s: %s", message.author, e)
+    except Exception as e:
+        log.error("on_message invite-ban error: %s", e)
+    finally:
+        await bot.process_commands(message)
+
 
 # ── License HTTP API ──────────────────────────────────────────────────
 LICENSE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
