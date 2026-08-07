@@ -365,16 +365,26 @@ async def recalculate_all_ranks(guild):
                 new_nick = build_rank_nick(pos, m.display_name)
                 if m.display_name != new_nick:
                     tasks.append((m, new_nick))
-            if tasks:
+            for attempt in range(2):
+                if not tasks:
+                    break
+                failed = []
                 batch_size = 5
                 for i in range(0, len(tasks), batch_size):
                     batch = tasks[i:i+batch_size]
                     results = await asyncio.gather(*[safe_nick_edit(m, n) for m, n in batch], return_exceptions=True)
-                    changed += sum(1 for r in results if r is True)
+                    for (m, n), r in zip(batch, results):
+                        if r is True:
+                            changed += 1
+                        else:
+                            failed.append((m, n))
                     if i + batch_size < len(tasks):
                         await asyncio.sleep(0.3)
+                tasks = failed
+                if tasks and attempt == 0:
+                    await asyncio.sleep(5)
             if changed:
-                log.info("Updated %d/%d nicknames in %s", changed, len(all_players), guild.name)
+                log.info("Updated %d nicknames in %s (%d failed)", changed, guild.name, len(tasks))
         except Exception as e:
             log.error("recalculate_all_ranks error in %s: %s", guild.name if guild else "?", e)
 
@@ -1938,23 +1948,32 @@ async def on_member_update(before, after):
     try:
         if after.bot or not after.guild:
             return
-        if not after.roles or not any(ROLE_NAME in r.name for r in after.roles):
+        had_rank = bool(before.roles and any(ROLE_NAME in r.name for r in before.roles))
+        has_rank = bool(after.roles and any(ROLE_NAME in r.name for r in after.roles))
+        if not had_rank and not has_rank:
             return
-        if before.display_name == after.display_name:
-            return
-        bot_member = after.guild.get_member(bot.user.id) if bot.user else None
+        guild = after.guild
+        bot_member = guild.get_member(bot.user.id) if bot.user else None
         if not bot_member or after.top_role >= bot_member.top_role:
             return
-        data = load_scores()
-        players = compute_rankings(after.guild, data)
-        for pos, (m, pts) in enumerate(players, 1):
-            if m.id == after.id:
-                new_nick = build_rank_nick(pos, after.display_name)
-                if after.display_name != new_nick:
-                    await safe_nick_edit(after, new_nick)
-                break
+        if had_rank and not has_rank:
+            base = strip_rank_prefix(after.display_name)
+            if after.display_name != base:
+                await safe_nick_edit(after, base)
+            return
+        if has_rank and not had_rank:
+            _spawn(recalculate_all_ranks(guild))
     except Exception as e:
         log.error("on_member_update error: %s", e)
+
+
+@bot.event
+async def on_member_remove(member):
+    try:
+        if member.guild:
+            _spawn(recalculate_all_ranks(member.guild))
+    except Exception as e:
+        log.error("on_member_remove error: %s", e)
 
 
 @bot.tree.command(name="sync", description="[Admin] Force resync all slash commands")
