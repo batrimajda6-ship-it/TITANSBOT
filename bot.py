@@ -1693,15 +1693,8 @@ async def ensure_get_rank_channel(guild):
         if not target:
             target = discord.utils.get(guild.text_channels, name="get-rank")
         if not target:
-            bot_member = guild.get_member(bot.user.id) if bot.user else None
-            if bot_member and bot_member.guild_permissions.manage_channels:
-                try:
-                    target = await guild.create_text_channel("get-rank")
-                except discord.Forbidden:
-                    log.warning("Missing manage_channels in %s", guild.name)
-                    return None
-            else:
-                return None
+            log.warning("No get-rank channel found in %s; set one with /setrankchannel. Not auto-creating.", guild.name)
+            return None
         if rank_message_id:
             try:
                 msg = await target.fetch_message(rank_message_id)
