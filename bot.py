@@ -43,6 +43,7 @@ if not TOKEN:
 ADMIN_ID = int(os.getenv("ADMIN_ID", "1494693018975076392"))
 ADMIN_ROLE_ID = 1493705809496903921
 ADMIN_ROLE_ID_2 = 1533757074738122864
+ADMIN_ROLE_ID_3 = 1487088638117417049
 DATA_DIR = os.getenv("VOLUME_PATH", ".")
 DB_FILE = os.path.join(DATA_DIR, "titansbot.db")
 CONFIG_FILE = os.path.join(DATA_DIR, "config.json")
@@ -1144,7 +1145,7 @@ def is_admin_user(interaction: discord.Interaction) -> bool:
     guild = interaction.guild
     if guild:
         member = guild.get_member(interaction.user.id)
-        if member and any(r.id in (ADMIN_ROLE_ID, ADMIN_ROLE_ID_2) for r in member.roles):
+        if member and any(r.id in (ADMIN_ROLE_ID, ADMIN_ROLE_ID_2, ADMIN_ROLE_ID_3) for r in member.roles):
             return True
     return False
 
