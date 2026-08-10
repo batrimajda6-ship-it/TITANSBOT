@@ -1142,11 +1142,11 @@ def is_admin_user(interaction: discord.Interaction) -> bool:
         return True
     if interaction.user.id in admin_ids:
         return True
-    guild = interaction.guild
-    if guild:
-        member = guild.get_member(interaction.user.id)
-        if member and any(r.id in (ADMIN_ROLE_ID, ADMIN_ROLE_ID_2, ADMIN_ROLE_ID_3) for r in member.roles):
-            return True
+    member = interaction.user if isinstance(interaction.user, discord.Member) else None
+    if member is None and interaction.guild:
+        member = interaction.guild.get_member(interaction.user.id)
+    if member and any(r.id in (ADMIN_ROLE_ID, ADMIN_ROLE_ID_2, ADMIN_ROLE_ID_3) for r in member.roles):
+        return True
     return False
 
 
