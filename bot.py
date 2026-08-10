@@ -583,10 +583,6 @@ class KeyModal(discord.ui.Modal, title="Enter Game Key"):
                     pass
             if l.is_full:
                 await _start_cleanup_timer(l)
-            try:
-                await interaction.user.send(f"Joined Team {self.team} \u2022 {l.mode.upper()} lobby")
-            except:
-                pass
         except Exception as e:
             log.error("KeyModal on_submit error: %s", e)
             try:
@@ -771,11 +767,6 @@ class LobbyView(View):
             await i.edit_original_response(embed=embed, view=InGameView(l.id))
         except:
             pass
-        for m in l.team1 + l.team2:
-            try:
-                await m.send(f"{l.mode.upper()} started!")
-            except:
-                pass
 
     async def cancel(self, i):
         l = self.lobby
