@@ -43,8 +43,7 @@ class OnboardView(View):
         return cb
 
     async def on_timeout(self):
-        try: await self.member.send("Timed out. Run `/onboard` to restart.")
-        except: pass
+        pass
 
 
 # ─── BOT SETUP ───────────────────────────────────────────
@@ -63,14 +62,6 @@ async def on_ready():
         bot.tree.copy_global_to(guild=guild)
         await bot.tree.sync(guild=guild)
     print("[SYNCED]")
-
-
-@bot.event
-async def on_member_join(member):
-    try:
-        await member.send("Welcome! Let's get you set up.", view=OnboardView(member, member.guild))
-    except:
-        pass
 
 
 @bot.tree.command(name="onboard", description="Start the onboarding questions")
