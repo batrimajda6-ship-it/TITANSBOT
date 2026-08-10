@@ -221,6 +221,7 @@ verify_role_id = cfg.get("verify_role_id", None)
 verify_channel_id = cfg.get("verify_channel_id", None)
 verify_message_id = cfg.get("verify_message_id", None)
 VERIFY_ROLE_NAME = "Verified"
+admin_ids = set(cfg.get("admin_ids", []) or [])
 
 
 _RANK_PREFIX_RE = re.compile(r"^Rank \d+ \| ")
@@ -1135,8 +1136,10 @@ async def error_boundary(interaction: discord.Interaction, fn, *args, **kwargs):
             pass
 
 
-def admin_check(interaction: discord.Interaction) -> bool:
+def is_admin_user(interaction: discord.Interaction) -> bool:
     if interaction.user.id == ADMIN_ID:
+        return True
+    if interaction.user.id in admin_ids:
         return True
     guild = interaction.guild
     if guild:
@@ -1144,6 +1147,10 @@ def admin_check(interaction: discord.Interaction) -> bool:
         if member and any(r.id in (ADMIN_ROLE_ID, ADMIN_ROLE_ID_2) for r in member.roles):
             return True
     return False
+
+
+def admin_check(interaction: discord.Interaction) -> bool:
+    return is_admin_user(interaction)
 
 
 def ratelimit(key: str, limit: int, window: float = 5.0):
@@ -2344,9 +2351,35 @@ def run_http_server():
     log.error("HTTP server could not start after 5 attempts")
 
 # ── License Slash Commands ────────────────────────────────────────────
+@bot.tree.command(name="addadmin", description="[Admin] Grant bot admin access to a user")
+async def cmd_addadmin(interaction: discord.Interaction, member: discord.Member):
+    if not is_admin_user(interaction):
+        return await interaction.response.send_message("You don't have permission.", ephemeral=True)
+    global admin_ids
+    admin_ids.add(member.id)
+    c = load_config()
+    c["admin_ids"] = sorted(admin_ids)
+    save_config(c)
+    await interaction.response.send_message(f"✅ {member.mention} is now a bot admin.", ephemeral=True)
+
+
+@bot.tree.command(name="removeadmin", description="[Admin] Remove bot admin access from a user")
+async def cmd_removeadmin(interaction: discord.Interaction, member: discord.Member):
+    if not is_admin_user(interaction):
+        return await interaction.response.send_message("You don't have permission.", ephemeral=True)
+    global admin_ids
+    if member.id == ADMIN_ID:
+        return await interaction.response.send_message("The owner cannot be removed.", ephemeral=True)
+    admin_ids.discard(member.id)
+    c = load_config()
+    c["admin_ids"] = sorted(admin_ids)
+    save_config(c)
+    await interaction.response.send_message(f"Removed {member.mention} from bot admins.", ephemeral=True)
+
+
 @bot.tree.command(name="genkeys", description="[Admin] Generate N license keys")
 async def genkeys(interaction: discord.Interaction, count: int = 1):
-    if interaction.user.id != ADMIN_ID and ADMIN_ROLE_ID not in [r.id for r in interaction.user.roles] and ADMIN_ROLE_ID_2 not in [r.id for r in interaction.user.roles]:
+    if not is_admin_user(interaction):
         return await interaction.response.send_message("You don't have permission.", ephemeral=True)
     if count < 1 or count > 50:
         return await interaction.response.send_message("Count must be 1-50.", ephemeral=True)
@@ -2363,7 +2396,7 @@ async def genkeys(interaction: discord.Interaction, count: int = 1):
 
 @bot.tree.command(name="addkey", description="[Admin] Register an existing license key")
 async def addkey(interaction: discord.Interaction, key: str):
-    if interaction.user.id != ADMIN_ID and ADMIN_ROLE_ID not in [r.id for r in interaction.user.roles] and ADMIN_ROLE_ID_2 not in [r.id for r in interaction.user.roles]:
+    if not is_admin_user(interaction):
         return await interaction.response.send_message("You don't have permission.", ephemeral=True)
     key = key.strip().upper()
     if not (key.startswith("MONSTER-") and len(key) == 25):
@@ -2380,7 +2413,7 @@ async def addkey(interaction: discord.Interaction, key: str):
 
 @bot.tree.command(name="listkeys", description="[Admin] List all license keys")
 async def listkeys(interaction: discord.Interaction):
-    if interaction.user.id != ADMIN_ID and ADMIN_ROLE_ID not in [r.id for r in interaction.user.roles] and ADMIN_ROLE_ID_2 not in [r.id for r in interaction.user.roles]:
+    if not is_admin_user(interaction):
         return await interaction.response.send_message("You don't have permission.", ephemeral=True)
     db = get_db()
     rows = db.execute("SELECT * FROM licenses ORDER BY created_at DESC LIMIT 50").fetchall()
