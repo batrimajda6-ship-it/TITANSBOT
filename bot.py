@@ -47,8 +47,8 @@ ADMIN_ROLE_ID_3 = 1487088638117417049
 DATA_DIR = os.getenv("VOLUME_PATH", ".")
 DB_FILE = os.path.join(DATA_DIR, "titansbot.db")
 CONFIG_FILE = os.path.join(DATA_DIR, "config.json")
-ROLE_NAME = "rank"
-APOSTADO_ROLE_NAME = "𝘼𝙋𝙊𝙎𝙏𝘼𝘿𝙊 𝙋𝙇𝘼𝙔𝙀𝙍"
+ROLE_NAME = "APOSTADO PLAYER"
+APOSTADO_ROLE_NAME = "APOSTADO PLAYER"
 
 CONFIG_LOCK = threading.Lock()
 SCORE_LOCK = threading.Lock()
@@ -1390,16 +1390,20 @@ async def cmd_syncrank(interaction: discord.Interaction):
         log.error("syncrank error: %s", e)
 
 
-@bot.tree.command(name="setrankchannel", description="Set the channel where rank reactions are tracked")
+@bot.tree.command(name="setrankchannel", description="Set the channel where 🏆 reactions grant the APOSTADO PLAYER role")
 async def cmd_setrankchannel(interaction: discord.Interaction, channel: discord.TextChannel):
     try:
-        global rank_message_id, rank_channel_id
+        global rank_message_id, rank_channel_id, apostado_channel_id
         if not admin_check(interaction):
             return await interaction.response.send_message("Only admin.", ephemeral=True)
         await interaction.response.defer(ephemeral=True)
+        guild = interaction.guild
+        role = await ensure_apostado_role(guild) if guild else None
         rank_channel_id = channel.id
+        apostado_channel_id = channel.id
         cfg = load_config()
         cfg["rank_channel_id"] = channel.id
+        cfg["apostado_channel_id"] = channel.id
         msg = None
         try:
             async for m in channel.history(limit=50):
@@ -1413,6 +1417,10 @@ async def cmd_setrankchannel(interaction: discord.Interaction, channel: discord.
             rank_message_id = msg.id
             cfg["rank_message_id"] = msg.id
             save_config(cfg)
+            try:
+                await msg.add_reaction("🏆")
+            except:
+                pass
             n = 0
             react = discord.utils.get(msg.reactions, emoji="🏆")
             if react:
@@ -1422,42 +1430,76 @@ async def cmd_setrankchannel(interaction: discord.Interaction, channel: discord.
                             n += 1
                 except:
                     pass
-            await interaction.followup.send(f"✅ Rank channel set to {channel.mention}. Found rank message with {n} 🏆 reactions. Use /refreshratings to sync roles.", ephemeral=True)
+            await interaction.followup.send(f"✅ Rank channel set to {channel.mention}. Found a 🏆 message with {n} reaction(s). Reacting grants the **APOSTADO PLAYER** role, unreacting removes it.", ephemeral=True)
         else:
-            save_config(cfg)
-            await interaction.followup.send(f"✅ Channel set to {channel.mention}, but no 🏆 message found in last 50. React with 🏆 on a message there, or use /syncrank.", ephemeral=True)
+            try:
+                msg = await channel.send("React with 🏆 to get the **APOSTADO PLAYER** role and play with the bot!\n\nUnreacting removes the role.")
+                await msg.add_reaction("🏆")
+                rank_message_id = msg.id
+                cfg["rank_message_id"] = msg.id
+                save_config(cfg)
+                await interaction.followup.send(f"✅ Rank channel set to {channel.mention}. Created a new 🏆 reaction message. Reacting grants the **APOSTADO PLAYER** role, unreacting removes it.", ephemeral=True)
+            except discord.Forbidden:
+                save_config(cfg)
+                await interaction.followup.send(f"✅ Channel set to {channel.mention}, but I couldn't send the message there (missing permission).", ephemeral=True)
     except Exception as e:
         log.error("setrankchannel error: %s", e)
 
 
-@bot.tree.command(name="setapostadochannel", description="Set the channel where APOSTADO reactions are tracked")
-async def cmd_setapostadochannel(interaction: discord.Interaction, channel: discord.TextChannel):
-    try:
-        global apostado_role_id
-        if not admin_check(interaction):
-            return await interaction.response.send_message("Only admin.", ephemeral=True)
-        await interaction.response.defer(ephemeral=True)
-        cfg = load_config()
-        cfg["apostado_channel_id"] = channel.id
-        save_config(cfg)
-        msg = None
+@bot.tree.command(name="mergeroles", description="[Admin] Merge two roles into one APOSTADO PLAYER role (blue)")
+async def cmd_mergeroles(interaction: discord.Interaction, role1: discord.Role, role2: discord.Role):
+    if not admin_check(interaction):
+        return await interaction.response.send_message("Only admin.", ephemeral=True)
+    await interaction.response.defer(ephemeral=True)
+    guild = interaction.guild
+    if not guild:
+        return await interaction.followup.send("Guild not found.", ephemeral=True)
+    global rank_role_id, apostado_role_id
+    target = guild.get_role(apostado_role_id)
+    if not target:
+        target = discord.utils.get(guild.roles, name=APOSTADO_ROLE_NAME)
+    if not target:
+        bot_member = guild.get_member(bot.user.id) if bot.user else None
+        if not bot_member or not bot_member.guild_permissions.manage_roles:
+            return await interaction.followup.send("I need the Manage Roles permission to create the role.", ephemeral=True)
         try:
-            async for m in channel.history(limit=50):
-                react = discord.utils.get(m.reactions, emoji="🏆")
-                if react:
-                    msg = m
-                    break
-        except:
-            pass
-        if msg:
-            await msg.add_reaction("🏆")
-            await interaction.followup.send(f"✅ APOSTADO channel set to {channel.mention}. Found existing 🏆 message. Use /refreshratings to sync roles.", ephemeral=True)
-        else:
-            msg = await channel.send("React with 🏆 to get the **APOSTADO PLAYER** role and access the bot!")
-            await msg.add_reaction("🏆")
-            await interaction.followup.send(f"✅ APOSTADO channel set to {channel.mention}. Created new reaction message.", ephemeral=True)
-    except Exception as e:
-        log.error("setapostadochannel error: %s", e)
+            target = await guild.create_role(name=APOSTADO_ROLE_NAME, color=discord.Color.blue(), reason="Merged APOSTADO PLAYER role")
+        except discord.Forbidden:
+            return await interaction.followup.send("I can't create roles here.", ephemeral=True)
+    bot_member = guild.get_member(bot.user.id) if bot.user else None
+    members = {}
+    for src in (role1, role2):
+        if src.id == target.id:
+            continue
+        for m in src.members:
+            members[m.id] = m
+    assigned = 0
+    for m in members.values():
+        if bot_member and m.top_role >= bot_member.top_role:
+            continue
+        if await safe_add_role(m, target):
+            assigned += 1
+    deleted = 0
+    for src in (role1, role2):
+        if src.id == target.id:
+            continue
+        try:
+            await src.delete(reason="Merged into APOSTADO PLAYER")
+            deleted += 1
+        except discord.Forbidden:
+            continue
+    rank_role_id = target.id
+    apostado_role_id = target.id
+    cfg = load_config()
+    cfg["rank_role_id"] = target.id
+    cfg["apostado_role_id"] = target.id
+    save_config(cfg)
+    await recalculate_all_ranks(guild)
+    await interaction.followup.send(
+        f"✅ Merged {role1.mention} and {role2.mention} into {target.mention} (blue).\n"
+        f"Assigned to {assigned} member(s), deleted {deleted} old role(s).",
+        ephemeral=True,
+    )
 
 
 @bot.tree.command(name="addpoints", description="Add or remove points from a player")
@@ -1864,7 +1906,7 @@ async def ensure_rank_role(guild):
         if not role:
             bot_member = guild.get_member(bot.user.id) if bot.user else None
             if bot_member and bot_member.guild_permissions.manage_roles:
-                role = await guild.create_role(name=ROLE_NAME, reason="Auto-created rank role")
+                role = await guild.create_role(name=ROLE_NAME, color=discord.Color.blue(), reason="Auto-created rank role")
             else:
                 log.warning("Missing manage_roles permission in %s", guild.name)
                 return None
@@ -1926,7 +1968,7 @@ async def ensure_apostado_role(guild):
         if not role:
             bot_member = guild.get_member(bot.user.id) if bot.user else None
             if bot_member and bot_member.guild_permissions.manage_roles:
-                role = await guild.create_role(name=APOSTADO_ROLE_NAME, reason="Auto-created APOSTADO PLAYER role")
+                role = await guild.create_role(name=APOSTADO_ROLE_NAME, color=discord.Color.blue(), reason="Auto-created APOSTADO PLAYER role")
             else:
                 log.warning("Missing manage_roles permission in %s", guild.name)
                 return None
