@@ -418,6 +418,8 @@ class Lobby:
         self.t1_vc_id = None
         self.t2_vc_id = None
         self.text_id = None
+        self.vote_id = None
+        self.cancel_vote = None
         self.original_vcs: dict[int, int] = {}
         self.match_id = ""
         self.password = ""
@@ -483,7 +485,7 @@ async def cleanup_game(lobby, guild):
     if move_tasks:
         await asyncio.gather(*move_tasks, return_exceptions=True)
     delete_tasks = []
-    for cid in [lobby.text_id, lobby.t1_vc_id, lobby.t2_vc_id, lobby.category_id]:
+    for cid in [lobby.text_id, lobby.vote_id, lobby.t1_vc_id, lobby.t2_vc_id, lobby.category_id]:
         if cid:
             ch = guild.get_channel(cid)
             if ch:
@@ -524,30 +526,233 @@ async def _start_cleanup_timer(lobby):
     lobby.cleanup_task = asyncio.create_task(timer())
 
 
-class MvpView(View):
-    def __init__(self, team_members, label):
-        super().__init__(timeout=120)
-        self.mvp = None
-        self.team_members = team_members
-        for m in team_members:
-            b = Button(label=m.display_name, style=discord.ButtonStyle.primary)
-            b.callback = self._make_cb(m)
+class MatchVote:
+    def __init__(self, lobby, question, options, voters):
+        self.lobby = lobby
+        self.question = question
+        self.options = options          # list of (value, label)
+        self.voters = set(voters)
+        self.votes = {}
+        self.closed = False
+        self.result = None
+        self.message_id = None
+        self.channel = None
+
+    @property
+    def tally(self):
+        tally = {val: 0 for val, _ in self.options}
+        for val in self.votes.values():
+            if val in tally:
+                tally[val] += 1
+        return tally
+
+    def most_votes(self):
+        tally = self.tally
+        top = max(tally.values()) if tally else 0
+        winners = [val for val, c in tally.items() if c == top and c > 0]
+        return random.choice(winners) if winners else None
+
+
+def vote_embed(vote, final=False):
+    labels = dict(vote.options)
+    lines = "\n".join(f"**{labels.get(val, val)}** \u2014 {vote.tally.get(val, 0)} vote(s)" for val, _ in vote.options)
+    embed = discord.Embed(title=vote.question, description=lines or "_No options_", color=0x3BA55C if final else 0x5865F2)
+    embed.set_footer(text="Each match player votes once \u2014 the most votes decide")
+    if final and vote.result is not None:
+        embed.add_field(name="\U0001f4ca Result", value=labels.get(vote.result, str(vote.result)), inline=False)
+    return embed
+
+
+class VoteView(View):
+    def __init__(self, vote):
+        super().__init__(timeout=None)
+        self.vote = vote
+        self.on_complete = None
+        for value, label in vote.options:
+            b = Button(label=label, style=discord.ButtonStyle.primary)
+            b.callback = self._make_cb(value)
             self.add_item(b)
 
-    def _make_cb(self, member):
+    def _make_cb(self, value):
         async def cb(i: discord.Interaction):
             try:
-                self.mvp = member
-                for child in self.children:
-                    child.disabled = True
-                await i.response.edit_message(content=f"MVP: {member.mention}", view=self)
-                self.stop()
-            except (discord.NotFound, discord.InteractionResponded):
-                self.stop()
+                v = self.vote
+                if v.closed:
+                    return await i.response.send_message("Voting is closed.", ephemeral=True)
+                if i.user.id not in v.voters:
+                    return await i.response.send_message("You're not part of this match.", ephemeral=True)
+                if i.user.id in v.votes:
+                    return await i.response.send_message("You already voted!", ephemeral=True)
+                v.votes[i.user.id] = value
+                try:
+                    await i.response.send_message("\u2705 Vote counted!", ephemeral=True)
+                except:
+                    pass
+                try:
+                    if i.message:
+                        await i.message.edit(embed=vote_embed(v), view=self)
+                except:
+                    pass
+                if len(v.votes) >= len(v.voters):
+                    v.closed = True
+                    v.result = v.most_votes()
+                    for child in self.children:
+                        child.disabled = True
+                    try:
+                        if i.message:
+                            await i.message.edit(embed=vote_embed(v, final=True), view=self)
+                    except:
+                        pass
+                    if self.on_complete:
+                        try:
+                            await self.on_complete(v)
+                        except Exception as e:
+                            log.error("vote on_complete error: %s", e)
             except Exception as e:
-                log.error("MVP callback error: %s", e)
-                self.stop()
+                log.error("VoteView cb error: %s", e)
         return cb
+
+
+async def _auto_close_vote(view, close_after):
+    await asyncio.sleep(close_after)
+    v = view.vote
+    if v.closed:
+        return
+    v.closed = True
+    v.result = v.most_votes()
+    for child in view.children:
+        child.disabled = True
+    if v.message_id and v.channel:
+        msg = await safe_fetch_message(v.channel, v.message_id)
+        if msg:
+            try:
+                await msg.edit(embed=vote_embed(v, final=True), view=view)
+            except:
+                pass
+    if view.on_complete:
+        try:
+            await view.on_complete(v)
+        except Exception as e:
+            log.error("auto-close vote error: %s", e)
+
+
+async def run_vote(channel, lobby, question, options, voters, close_after=180):
+    vote = MatchVote(lobby, question, options, voters)
+    view = VoteView(vote)
+    msg = await safe_send(channel, embed=vote_embed(vote), view=view)
+    if not msg:
+        vote.closed = True
+        vote.result = vote.most_votes()
+        return vote
+    vote.message_id = msg.id
+    vote.channel = channel
+    loop = asyncio.get_running_loop()
+    future = loop.create_future()
+    view.on_complete = lambda v: (future.set_result(v) if not future.done() else None)
+    _spawn(_auto_close_vote(view, close_after))
+    try:
+        return await asyncio.wait_for(future, timeout=close_after + 60)
+    except asyncio.TimeoutError:
+        return vote
+
+
+async def _apply_match_results(guild, lobby, win_team, lose_team, win_mvp, lose_mvp):
+    tracked = [m for m in lobby.team1 + lobby.team2 if m.roles and any(ROLE_NAME in r.name for r in m.roles)]
+    tracked_ids = {m.id for m in tracked}
+    wp = [m.id for m in win_team]
+    gid = str(guild.id)
+
+    def _apply(g):
+        for m in tracked:
+            u = g.setdefault(str(m.id), {"name": m.name, "points": 0, "wins": 0, "losses": 0, "mvp_wins": 0, "mvp_losses": 0})
+            u["name"] = m.name
+            if m.id in wp:
+                u["points"] += 5
+                u["wins"] += 1
+            else:
+                u["losses"] += 1
+        for mid, pts, key, name in [(win_mvp.id, 5, "mvp_wins", win_mvp.name), (lose_mvp.id, 2, "mvp_losses", lose_mvp.name)]:
+            if mid not in tracked_ids:
+                continue
+            u = g.setdefault(str(mid), {"name": name, "points": 0, "wins": 0, "losses": 0, "mvp_wins": 0, "mvp_losses": 0})
+            u["points"] += pts
+            u[key] += 1
+
+    update_scores(gid, _apply)
+    _spawn(recalculate_all_ranks(guild))
+    return tracked_ids
+
+
+async def run_post_game_votes(guild, lobby, vote_ch):
+    all_players = lobby.team1 + lobby.team2
+    voters = {m.id for m in all_players}
+    if not voters:
+        return False
+
+    if lobby.cancel_vote and lobby.cancel_vote.message_id:
+        lobby.cancel_vote.closed = True
+        msg = await safe_fetch_message(vote_ch, lobby.cancel_vote.message_id)
+        if msg:
+            try:
+                await msg.edit(embed=vote_embed(lobby.cancel_vote, final=True), view=None)
+            except:
+                pass
+
+    v = await run_vote(vote_ch, lobby, "Which team won?", [("t1", "\U0001f535 Team 1"), ("t2", "\U0001f534 Team 2")], voters, close_after=180)
+    if not v or v.result is None:
+        return False
+    win_side = v.result
+    win_team = lobby.team1 if win_side == "t1" else lobby.team2
+    lose_team = lobby.team2 if win_side == "t1" else lobby.team1
+    win_label = "Team 1" if win_side == "t1" else "Team 2"
+    lose_label = "Team 2" if win_side == "t1" else "Team 1"
+    we = "\U0001f535" if win_side == "t1" else "\U0001f534"
+    le = "\U0001f534" if win_side == "t1" else "\U0001f535"
+
+    v2 = await run_vote(vote_ch, lobby, f"Vote the MVP of {win_label} (winners)", [(str(m.id), m.display_name) for m in win_team], voters, close_after=180)
+    v3 = await run_vote(vote_ch, lobby, f"Vote the MVP of {lose_label} (losers)", [(str(m.id), m.display_name) for m in lose_team], voters, close_after=180)
+    win_mvp = guild.get_member(int(v2.result)) if v2 and v2.result else None
+    lose_mvp = guild.get_member(int(v3.result)) if v3 and v3.result else None
+
+    tracked_ids = await _apply_match_results(guild, lobby, win_team, lose_team, win_mvp, lose_mvp)
+
+    check = "\u2705"
+    cross = "\u274c"
+    def team_line(team):
+        return "\n".join(f"{m.mention} {check if m.id in tracked_ids else cross}" for m in team)
+    win_mvp_txt = f"{win_mvp.mention} (no rank role)" if win_mvp and win_mvp.id not in tracked_ids else (win_mvp.mention if win_mvp else "None")
+    lose_mvp_txt = f"{lose_mvp.mention} (no rank role)" if lose_mvp and lose_mvp.id not in tracked_ids else (lose_mvp.mention if lose_mvp else "None")
+
+    embed = discord.Embed(title=f"\U0001f3c6 {win_label} WINS!", color=0xFFD700)
+    embed.add_field(name=f"{we} {win_label} (+5 each)", value=team_line(win_team), inline=True)
+    embed.add_field(name=f"{le} {lose_label}", value=team_line(lose_team), inline=True)
+    embed.add_field(name="\u200b", value="\u200b", inline=True)
+    embed.add_field(name=f"\u2b50 {win_label} MVP (+5 bonus)", value=win_mvp_txt, inline=True)
+    embed.add_field(name=f"\U0001f4aa {lose_label} MVP (+2)", value=lose_mvp_txt, inline=True)
+    embed.add_field(name="\u200b", value="\u200b", inline=True)
+    embed.set_footer(text="\u2705 Points updated \u2022 decided by player votes")
+    await safe_send(vote_ch, embed=embed)
+    await safe_send(vote_ch, "Choose next action:", view=PostGameEndView(lobby.id, guild))
+    return True
+
+
+async def _cancel_vote_flow(lobby, guild, vote_ch):
+    all_players = lobby.team1 + lobby.team2
+    voters = {m.id for m in all_players}
+    if not voters:
+        return
+    v = await run_vote(vote_ch, lobby, "Cancel the game?", [("cancel", "\u270b Cancel"), ("continue", "\u25b6\ufe0f Continue")], voters, close_after=600)
+    lobby.cancel_vote = v
+    if v.closed and v.result is None:
+        return
+    cancel_count = v.tally.get("cancel", 0)
+    cont_count = v.tally.get("continue", 0)
+    if cancel_count > cont_count:
+        lobby.active = False
+        await safe_send(vote_ch, embed=discord.Embed(title="\u274c Game cancelled by vote", color=0xed4245))
+        await cleanup_game(lobby, guild)
+    else:
+        await safe_send(vote_ch, embed=discord.Embed(title="\u25b6\ufe0f Game continues", description="Vote decided: keep playing. End the match when it's over.", color=0x3BA55C))
 
 
 class KeyModal(discord.ui.Modal, title="Enter Game Key"):
@@ -704,7 +909,7 @@ class LobbyView(View):
             return
         try:
             overwrites = {guild.default_role: discord.PermissionOverwrite(connect=False)}
-            category = await guild.create_category(f"{l.creator.display_name}'s {l.mode}", overwrites=overwrites)
+            category = await guild.create_category(f"{l.creator.display_name}'s lobby", overwrites=overwrites)
             l.category_id = category.id
             t1_overwrites = {guild.default_role: discord.PermissionOverwrite(connect=False, view_channel=True)}
             for m in l.team1:
@@ -712,12 +917,14 @@ class LobbyView(View):
             t2_overwrites = {guild.default_role: discord.PermissionOverwrite(connect=False, view_channel=True)}
             for m in l.team2:
                 t2_overwrites[m] = discord.PermissionOverwrite(connect=True, view_channel=True)
-            vc1 = await guild.create_voice_channel(f"Team 1 ({l.mode})", category=category, overwrites=t1_overwrites)
-            vc2 = await guild.create_voice_channel(f"Team 2 ({l.mode})", category=category, overwrites=t2_overwrites)
+            vc1 = await guild.create_voice_channel("Team 1", category=category, overwrites=t1_overwrites)
+            vc2 = await guild.create_voice_channel("Team 2", category=category, overwrites=t2_overwrites)
             l.t1_vc_id = vc1.id
             l.t2_vc_id = vc2.id
-            text = await guild.create_text_channel(f"{l.mode.lower()}-lobby", category=category)
+            text = await guild.create_text_channel("lobby", category=category)
             l.text_id = text.id
+            vote_ch = await guild.create_text_channel("vote", category=category)
+            l.vote_id = vote_ch.id
             move_tasks = []
             for m in l.team1:
                 move_tasks.append(safe_move_member(m, vc1))
@@ -727,11 +934,12 @@ class LobbyView(View):
             msg = f"## \U0001f3ae Match Live!\n\U0001f194 **Match ID:** `{l.match_id}` \U0001f511 **Password:** `{l.password}`"
             if l.key:
                 msg += f" \U0001f510 **Key:** `{l.key}`"
-            msg += "\n\nClick a team button below when the match ends:"
-            await safe_send(text, msg, view=PostGameView(l.id))
+            msg += "\n\nResults, MVPs and cancellations are decided by player votes in the **#vote** channel."
+            await safe_send(text, msg)
+            _spawn(_cancel_vote_flow(l, guild, vote_ch))
         except discord.Forbidden as e:
             log.warning("Missing permissions for game room creation: %s", e)
-            for cid in [l.t1_vc_id, l.t2_vc_id, l.text_id, l.category_id]:
+            for cid in [l.t1_vc_id, l.t2_vc_id, l.text_id, l.vote_id, l.category_id]:
                 if cid:
                     ch = guild.get_channel(cid)
                     if ch:
@@ -745,7 +953,7 @@ class LobbyView(View):
             return
         except Exception as e:
             log.error("game room creation error: %s", e)
-            for cid in [l.t1_vc_id, l.t2_vc_id, l.text_id, l.category_id]:
+            for cid in [l.t1_vc_id, l.t2_vc_id, l.text_id, l.vote_id, l.category_id]:
                 if cid:
                     ch = guild.get_channel(cid)
                     if ch:
@@ -791,182 +999,44 @@ class InGameView(View):
     def __init__(self, lobby_id):
         super().__init__(timeout=None)
         self.lobby_id = lobby_id
+        self._running = False
 
-    @discord.ui.button(label="End Game", style=discord.ButtonStyle.red, emoji="\u26d4")
+    @discord.ui.button(label="End Match & Vote", style=discord.ButtonStyle.red, emoji="\U0001f3c1")
     async def end_game(self, i: discord.Interaction, b: Button):
         try:
             lobby = lobbies.get(self.lobby_id)
             if not lobby:
                 return await self._ephemeral(i, "Game not found.")
-            if i.user.id != lobby.creator.id:
-                return await self._ephemeral(i, "Only the creator can end the game.")
+            member_ids = {m.id for m in lobby.team1 + lobby.team2}
+            if i.user.id not in member_ids and not is_admin_user(i):
+                return await self._ephemeral(i, "Only match players can end the match.")
+            if self._running:
+                return await self._ephemeral(i, "Voting is already in progress.")
+            self._running = True
             try:
                 await i.response.defer()
             except:
                 return
             guild = i.guild
+            if not guild:
+                return
             try:
-                await i.edit_original_response(embed=discord.Embed(title="Game Ended - Cleaning up...", color=discord.Color.red()), view=None)
+                await i.edit_original_response(embed=discord.Embed(title="\U0001f3c1 Match over \u2014 voting is open in the vote channel", color=discord.Color.orange()), view=None)
             except:
                 pass
-            if guild:
+            vote_ch = guild.get_channel(lobby.vote_id) if lobby.vote_id else None
+            try:
+                if vote_ch:
+                    ok = await run_post_game_votes(guild, lobby, vote_ch)
+                else:
+                    ok = False
+                if not ok:
+                    await cleanup_game(lobby, guild)
+            except Exception as e:
+                log.error("post-game votes error: %s", e)
                 await cleanup_game(lobby, guild)
         except Exception as e:
             log.error("InGameView end_game error: %s", e)
-
-    async def _ephemeral(self, i, msg):
-        try:
-            await i.response.send_message(msg, ephemeral=True)
-        except:
-            pass
-
-
-class PostGameView(View):
-    def __init__(self, lobby_id):
-        super().__init__(timeout=None)
-        self.lobby_id = lobby_id
-
-    @discord.ui.button(label="Team 1 Wins", style=discord.ButtonStyle.blurple, emoji="\U0001f3c6")
-    async def t1_wins(self, i: discord.Interaction, b: Button):
-        await self._pick_mvp(i, 1)
-
-    @discord.ui.button(label="Team 2 Wins", style=discord.ButtonStyle.red, emoji="\U0001f3c6")
-    async def t2_wins(self, i: discord.Interaction, b: Button):
-        await self._pick_mvp(i, 2)
-
-    async def _restore_match_view(self, i, lobby):
-        if not lobby:
-            return
-        embed = discord.Embed(title=f"\U0001f3ae {lobby.mode.upper()} — LIVE", color=0x5865F2)
-        embed.add_field(name=f"\U0001f535 Team 1 ({len(lobby.team1)})", value="\n".join(m.mention for m in lobby.team1), inline=True)
-        embed.add_field(name=f"\U0001f534 Team 2 ({len(lobby.team2)})", value="\n".join(m.mention for m in lobby.team2), inline=True)
-        embed.set_footer(text="\u23f0 Game in progress")
-        try:
-            await i.edit_original_response(content=None, embed=embed, view=PostGameView(self.lobby_id))
-        except:
-            pass
-
-    async def _pick_mvp(self, i: discord.Interaction, winning_team: int):
-        try:
-            lobby = lobbies.get(self.lobby_id)
-            if not lobby:
-                return await self._ephemeral(i, "Game not found.")
-            if i.user.id != lobby.creator.id:
-                return await self._ephemeral(i, "Only the creator can finish.")
-            if not lobby.started:
-                return await self._ephemeral(i, "Game hasn't started yet.")
-            if not i.guild:
-                return
-
-            win_team = lobby.team1 if winning_team == 1 else lobby.team2
-            lose_team = lobby.team2 if winning_team == 1 else lobby.team1
-            win_label = "Team 1" if winning_team == 1 else "Team 2"
-            lose_label = "Team 2" if winning_team == 1 else "Team 1"
-            we = "\U0001f535" if winning_team == 1 else "\U0001f534"
-            le = "\U0001f534" if winning_team == 1 else "\U0001f535"
-
-            try:
-                await i.response.defer()
-            except:
-                return
-            try:
-                await i.edit_original_response(content="Selecting MVPs...", embed=None, view=None)
-            except:
-                pass
-
-            v1 = MvpView(win_team, f"{we} {win_label}")
-            try:
-                await i.followup.send(f"{we} Pick MVP from **{win_label}** (winners):", view=v1, ephemeral=True)
-            except:
-                return
-            await v1.wait()
-            if not v1.mvp:
-                await self._restore_match_view(i, lobby)
-                try:
-                    await i.followup.send("Timed out.", ephemeral=True)
-                except:
-                    pass
-                return
-            win_mvp = v1.mvp
-
-            v2 = MvpView(lose_team, f"{le} {lose_label}")
-            try:
-                await i.followup.send(f"{le} Pick MVP from **{lose_label}** (losers):", view=v2, ephemeral=True)
-            except:
-                return
-            await v2.wait()
-            if not v2.mvp:
-                await self._restore_match_view(i, lobby)
-                try:
-                    await i.followup.send("Timed out.", ephemeral=True)
-                except:
-                    pass
-                return
-            lose_mvp = v2.mvp
-
-            gid = str(i.guild_id)
-            wp = [m.id for m in win_team]
-            tracked = [m for m in lobby.team1 + lobby.team2 if m.roles and any(ROLE_NAME in r.name for r in m.roles)]
-            tracked_ids = {m.id for m in tracked}
-
-            def _apply(g):
-                for m in tracked:
-                    u = g.setdefault(str(m.id), {"name": m.name, "points": 0, "wins": 0, "losses": 0, "mvp_wins": 0, "mvp_losses": 0})
-                    u["name"] = m.name
-                    if m.id in wp:
-                        u["points"] += 5
-                        u["wins"] += 1
-                    else:
-                        u["losses"] += 1
-                for mid, pts, key in [(win_mvp.id, 5, "mvp_wins"), (lose_mvp.id, 2, "mvp_losses")]:
-                    if mid not in tracked_ids:
-                        continue
-                    name = win_mvp.name if mid == win_mvp.id else lose_mvp.name
-                    u = g.setdefault(str(mid), {"name": name, "points": 0, "wins": 0, "losses": 0, "mvp_wins": 0, "mvp_losses": 0})
-                    u["points"] += pts
-                    u[key] += 1
-
-            update_scores(gid, _apply)
-            _spawn(recalculate_all_ranks(i.guild))
-
-            check = "\u2705"
-            cross = "\u274c"
-            def team_line(team):
-                return "\n".join(f"{m.mention} {check if m.id in tracked_ids else cross}" for m in team)
-
-            win_mvp_txt = win_mvp.mention if win_mvp.id in tracked_ids else f"{win_mvp.mention} (no rank role)"
-            lose_mvp_txt = lose_mvp.mention if lose_mvp.id in tracked_ids else f"{lose_mvp.mention} (no rank role)"
-
-            embed = discord.Embed(title=f"\U0001f3c6 {win_label} WINS!", color=0xFFD700)
-            embed.add_field(name=f"{we} {win_label} (+5 each)", value=team_line(win_team), inline=True)
-            embed.add_field(name=f"{le} {lose_label}", value=team_line(lose_team), inline=True)
-            embed.add_field(name="\u200b", value="\u200b", inline=True)
-            embed.add_field(name=f"\u2b50 {win_label} MVP (+5 bonus)", value=win_mvp_txt, inline=True)
-            embed.add_field(name=f"\U0001f4aa {lose_label} MVP (+2)", value=lose_mvp_txt, inline=True)
-            embed.add_field(name="\u200b", value="\u200b", inline=True)
-            embed.set_footer(text="\u2705 Points updated!")
-            try:
-                await i.edit_original_response(content=None, embed=embed, view=None)
-            except:
-                pass
-            try:
-                await i.followup.send(embed=embed)
-            except:
-                pass
-            if lobby.channel and lobby.message_id:
-                orig_msg = await safe_fetch_message(lobby.channel, lobby.message_id)
-                if orig_msg:
-                    try:
-                        done = discord.Embed(title=f"\u2705 Game Over \u2022 {lobby.mode}", color=0x808080)
-                        await orig_msg.edit(embed=done, view=None)
-                    except:
-                        pass
-            try:
-                await i.followup.send("Choose next action:", view=PostGameEndView(lobby.id, i.guild), ephemeral=True)
-            except:
-                pass
-        except Exception as e:
-            log.error("_pick_mvp error: %s", e)
 
     async def _ephemeral(self, i, msg):
         try:
@@ -987,8 +1057,9 @@ class PostGameEndView(View):
             lobby = lobbies.get(self.lobby_id)
             if not lobby:
                 return await self._ephemeral(i, "Lobby gone.")
-            if i.user.id != lobby.creator.id:
-                return await self._ephemeral(i, "Only creator.")
+            member_ids = {m.id for m in lobby.team1 + lobby.team2}
+            if i.user.id not in member_ids and not is_admin_user(i):
+                return await self._ephemeral(i, "Only match players.")
             try:
                 await i.response.defer(ephemeral=True)
             except:
@@ -1018,8 +1089,9 @@ class PostGameEndView(View):
             lobby = lobbies.get(self.lobby_id)
             if not lobby:
                 return await self._ephemeral(i, "Lobby gone.")
-            if i.user.id != lobby.creator.id:
-                return await self._ephemeral(i, "Only creator.")
+            member_ids = {m.id for m in lobby.team1 + lobby.team2}
+            if i.user.id not in member_ids and not is_admin_user(i):
+                return await self._ephemeral(i, "Only match players.")
             try:
                 await i.response.defer(ephemeral=True)
             except:
