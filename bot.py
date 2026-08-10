@@ -217,6 +217,10 @@ apostado_role_id = cfg.get("apostado_role_id", None)
 apostado_channel_id = cfg.get("apostado_channel_id", 1534172808882556988)
 stay_vc_id = cfg.get("stay_vc_id", 1535125369949134848)
 stay_music_url = cfg.get("stay_music_url", "https://www.youtube.com/watch?v=gIYaTs1Kw90")
+verify_role_id = cfg.get("verify_role_id", None)
+verify_channel_id = cfg.get("verify_channel_id", None)
+verify_message_id = cfg.get("verify_message_id", None)
+VERIFY_ROLE_NAME = "Verified"
 
 
 _RANK_PREFIX_RE = re.compile(r"^Rank \d+ \| ")
@@ -1648,6 +1652,65 @@ async def prefix_4v4(ctx):
     await _send_prefix_mode(ctx, "4v4")
 
 
+class VerifyView(View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="✅ Verify", style=discord.ButtonStyle.success, custom_id="verify_button")
+    async def verify_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        try:
+            member = interaction.user if isinstance(interaction.user, discord.Member) else None
+            if member is None:
+                return await interaction.response.send_message("Run this inside the server.", ephemeral=True)
+            await interaction.response.send_message(await _grant_verify_role(member), ephemeral=True)
+        except Exception as e:
+            log.error("verify button error: %s", e)
+            try:
+                await interaction.response.send_message("Something went wrong.", ephemeral=True)
+            except:
+                pass
+
+
+@bot.tree.command(name="verify", description="Verify yourself to get the Verified role")
+async def cmd_verify(interaction: discord.Interaction):
+    try:
+        member = interaction.user if isinstance(interaction.user, discord.Member) else None
+        if member is None:
+            return await interaction.response.send_message("Run this inside the server.", ephemeral=True)
+        await interaction.response.send_message(await _grant_verify_role(member), ephemeral=True)
+    except Exception as e:
+        log.error("verify cmd error: %s", e)
+
+
+@bot.tree.command(name="setupverify", description="Post the verification button in this channel (admin)")
+async def cmd_setupverify(interaction: discord.Interaction):
+    try:
+        if not admin_check(interaction):
+            return await interaction.response.send_message("You are not an admin.", ephemeral=True)
+        role = await ensure_verify_role(interaction.guild)
+        if not role:
+            return await interaction.response.send_message("Could not create the Verified role. Check my permissions.", ephemeral=True)
+        view = VerifyView()
+        msg = await interaction.channel.send("🔓 **Verification**\nClick the button below to verify and unlock the server!", view=view)
+        global verify_role_id, verify_message_id, verify_channel_id
+        verify_role_id = role.id
+        verify_message_id = msg.id
+        verify_channel_id = interaction.channel.id
+        c = load_config()
+        c["verify_role_id"] = role.id
+        c["verify_message_id"] = msg.id
+        c["verify_channel_id"] = interaction.channel.id
+        save_config(c)
+        bot.add_view(view)
+        await interaction.response.send_message("✅ Verification message posted in this channel.", ephemeral=True)
+    except Exception as e:
+        log.error("setupverify error: %s", e)
+        try:
+            await interaction.response.send_message("Something went wrong.", ephemeral=True)
+        except:
+            pass
+
+
 @bot.tree.command(name="admin", description="Admin panel (hidden)")
 async def cmd_admin(interaction: discord.Interaction):
     try:
@@ -1790,6 +1853,60 @@ async def ensure_apostado_role(guild):
     except Exception as e:
         log.error("ensure_apostado_role error in %s: %s", guild.name, e)
         return None
+
+
+async def ensure_verify_role(guild):
+    global verify_role_id
+    try:
+        role = guild.get_role(verify_role_id)
+        if not role:
+            role = discord.utils.get(guild.roles, name=VERIFY_ROLE_NAME)
+        if not role:
+            bot_member = guild.get_member(bot.user.id) if bot.user else None
+            if bot_member and bot_member.guild_permissions.manage_roles:
+                role = await guild.create_role(name=VERIFY_ROLE_NAME, reason="Auto-created Verified role")
+            else:
+                log.warning("Missing manage_roles permission in %s", guild.name)
+                return None
+        if role.id != verify_role_id:
+            verify_role_id = role.id
+            c = load_config()
+            c["verify_role_id"] = role.id
+            save_config(c)
+        return role
+    except discord.Forbidden:
+        log.warning("Forbidden to create/manage Verified role in %s", guild.name)
+        return None
+    except Exception as e:
+        log.error("ensure_verify_role error in %s: %s", guild.name, e)
+        return None
+
+
+_verify_locked: set = set()
+
+async def _grant_verify_role(member):
+    if member.id in _verify_locked:
+        return "Verification is already being processed..."
+    _verify_locked.add(member.id)
+    try:
+        guild = member.guild
+        role = guild.get_role(verify_role_id) or await ensure_verify_role(guild)
+        if not role:
+            return "The Verified role is not set up yet. Ask an admin to run /setupverify."
+        bot_member = guild.get_member(bot.user.id) if bot.user else None
+        if bot_member and role.position >= bot_member.top_role.position:
+            return "The Verified role is above my highest role. Move it below my role and try again."
+        if role in member.roles:
+            return "You are already verified! ✅"
+        await safe_add_role(member, role)
+        return f"✅ You are now verified in **{guild.name}**! Welcome! 🎉"
+    except discord.Forbidden:
+        return "I don't have permission to assign roles here."
+    except Exception as e:
+        log.error("verify error for %s: %s", member.id, e)
+        return "Something went wrong. This has been logged."
+    finally:
+        _verify_locked.discard(member.id)
 
 
 async def _handle_apostado_reaction(guild, user_id, add):
@@ -2001,6 +2118,7 @@ async def on_ready():
             log.error("sync failed for %s: %s", guild.name, e)
         _spawn(recalculate_all_ranks(guild))
     await ensure_stay_voice()
+    bot.add_view(VerifyView())
     if not _maintenance_started:
         _maintenance_started = True
         _spawn(maintenance_loop())
