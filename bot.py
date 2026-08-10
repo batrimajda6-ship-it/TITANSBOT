@@ -421,6 +421,9 @@ class Lobby:
         self.vote_id = None
         self.cancel_vote = None
         self.original_vcs: dict[int, int] = {}
+        self.voice_warnings: dict[int, int] = {}
+        self.paused = False
+        self.finished = False
         self.match_id = ""
         self.password = ""
         self.key = ""
@@ -472,9 +475,7 @@ def build_embed(lobby):
     return embed
 
 
-async def cleanup_game(lobby, guild):
-    if not lobby or not guild:
-        return
+async def _move_back_players(lobby, guild):
     move_tasks = []
     for m in lobby.team1 + lobby.team2:
         orig_id = lobby.original_vcs.get(m.id)
@@ -484,6 +485,12 @@ async def cleanup_game(lobby, guild):
                 move_tasks.append(safe_move_member(m, target))
     if move_tasks:
         await asyncio.gather(*move_tasks, return_exceptions=True)
+
+
+async def cleanup_game(lobby, guild):
+    if not lobby or not guild:
+        return
+    await _move_back_players(lobby, guild)
     delete_tasks = []
     for cid in [lobby.text_id, lobby.vote_id, lobby.t1_vc_id, lobby.t2_vc_id, lobby.category_id]:
         if cid:
@@ -732,6 +739,7 @@ async def run_post_game_votes(guild, lobby, vote_ch):
     embed.add_field(name="\u200b", value="\u200b", inline=True)
     embed.set_footer(text="\u2705 Points updated \u2022 decided by player votes")
     await safe_send(vote_ch, embed=embed)
+    await _move_back_players(lobby, guild)
     await safe_send(vote_ch, "Choose next action:", view=PostGameEndView(lobby.id, guild))
     return True
 
@@ -743,6 +751,7 @@ async def _cancel_vote_flow(lobby, guild, vote_ch):
         return
     v = await run_vote(vote_ch, lobby, "Cancel the game?", [("cancel", "\u270b Cancel"), ("continue", "\u25b6\ufe0f Continue")], voters, close_after=600)
     lobby.cancel_vote = v
+    lobby.paused = False
     if v.closed and v.result is None:
         return
     cancel_count = v.tally.get("cancel", 0)
@@ -752,7 +761,116 @@ async def _cancel_vote_flow(lobby, guild, vote_ch):
         await safe_send(vote_ch, embed=discord.Embed(title="\u274c Game cancelled by vote", color=0xed4245))
         await cleanup_game(lobby, guild)
     else:
-        await safe_send(vote_ch, embed=discord.Embed(title="\u25b6\ufe0f Game continues", description="Vote decided: keep playing. End the match when it's over.", color=0x3BA55C))
+        await safe_send(vote_ch, embed=discord.Embed(title="\u25b6\ufe0f Game continues", description="Vote decided: keep playing. Use **Finish** in this channel when it's over.", color=0x3BA55C))
+
+
+async def _monitor_team_voice(lobby, guild, vote_ch):
+    try:
+        while lobbies.get(lobby.id) is lobby and lobby.started and not lobby.finished and not lobby.paused:
+            await asyncio.sleep(30)
+            if lobbies.get(lobby.id) is not lobby or lobby.finished or lobby.paused:
+                break
+            t1 = guild.get_channel(lobby.t1_vc_id) if lobby.t1_vc_id else None
+            t2 = guild.get_channel(lobby.t2_vc_id) if lobby.t2_vc_id else None
+            for team, vc, label in [(lobby.team1, t1, "Team 1"), (lobby.team2, t2, "Team 2")]:
+                for m in list(team):
+                    try:
+                        in_vc = bool(vc) and bool(m.voice) and bool(m.voice.channel) and m.voice.channel.id == vc.id
+                        if in_vc:
+                            lobby.voice_warnings.pop(m.id, None)
+                            continue
+                        count = lobby.voice_warnings.get(m.id, 0) + 1
+                        lobby.voice_warnings[m.id] = count
+                        if count == 1:
+                            await safe_send(vote_ch, f"\u26a0\ufe0f {m.mention} you're not in the **{label}** voice channel. Return now or you'll be timed out!")
+                        else:
+                            lobby.voice_warnings[m.id] = 0
+                            try:
+                                await m.timeout(datetime.timedelta(minutes=5), reason=f"Left {label} voice during match")
+                                await safe_send(vote_ch, f"\U0001f6ab {m.mention} timed out for leaving {label} voice. Don't do it again.")
+                            except Exception as e:
+                                log.error("voice monitor timeout error: %s", e)
+                    except Exception as e:
+                        log.error("voice monitor player error: %s", e)
+    except asyncio.CancelledError:
+        pass
+    except Exception as e:
+        log.error("voice monitor error: %s", e)
+
+
+class MatchControlView(View):
+    def __init__(self, lobby_id, guild, vote_ch):
+        super().__init__(timeout=None)
+        self.lobby_id = lobby_id
+        self.guild = guild
+        self.vote_ch = vote_ch
+        self._busy = False
+
+    async def _can_act(self, i):
+        lobby = lobbies.get(self.lobby_id)
+        if not lobby:
+            return None
+        member_ids = {m.id for m in lobby.all_members()}
+        if i.user.id not in member_ids and not is_admin_user(i):
+            return None
+        return lobby
+
+    async def _ephemeral(self, i, msg):
+        try:
+            await i.response.send_message(msg, ephemeral=True)
+        except (discord.NotFound, discord.InteractionResponded):
+            pass
+        except Exception:
+            pass
+
+    async def _disable(self, i):
+        try:
+            for child in self.children:
+                child.disabled = True
+            await i.message.edit(view=self)
+        except Exception:
+            pass
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.red, emoji="\u26d4")
+    async def cancel(self, i: discord.Interaction, b: Button):
+        lobby = await self._can_act(i)
+        if not lobby:
+            return await self._ephemeral(i, "You're not part of this match.")
+        if self._busy:
+            return await self._ephemeral(i, "An action is already running.")
+        self._busy = True
+        lobby.paused = True
+        await self._disable(i)
+        try:
+            await i.response.defer()
+        except:
+            pass
+        _spawn(_cancel_vote_flow(lobby, self.guild, self.vote_ch))
+
+    @discord.ui.button(label="Finish", style=discord.ButtonStyle.green, emoji="\U0001f3c1")
+    async def finish(self, i: discord.Interaction, b: Button):
+        lobby = await self._can_act(i)
+        if not lobby:
+            return await self._ephemeral(i, "You're not part of this match.")
+        if self._busy:
+            return await self._ephemeral(i, "An action is already running.")
+        self._busy = True
+        lobby.finished = True
+        await self._disable(i)
+        try:
+            await i.response.defer()
+        except:
+            pass
+        _spawn(self._finish_flow(lobby))
+
+    async def _finish_flow(self, lobby):
+        try:
+            ok = await run_post_game_votes(self.guild, lobby, self.vote_ch)
+            if not ok:
+                await cleanup_game(lobby, self.guild)
+        except Exception as e:
+            log.error("finish flow error: %s", e)
+            await cleanup_game(lobby, self.guild)
 
 
 class KeyModal(discord.ui.Modal, title="Enter Game Key"):
@@ -934,9 +1052,13 @@ class LobbyView(View):
             msg = f"## \U0001f3ae Match Live!\n\U0001f194 **Match ID:** `{l.match_id}` \U0001f511 **Password:** `{l.password}`"
             if l.key:
                 msg += f" \U0001f510 **Key:** `{l.key}`"
-            msg += "\n\nResults, MVPs and cancellations are decided by player votes in the **#vote** channel."
+            msg += "\n\nUse the **\u26d4 Cancel** or **\U0001f3c1 Finish** buttons in the **#vote** channel. Everyone must stay in their team voice channel."
             await safe_send(text, msg)
-            _spawn(_cancel_vote_flow(l, guild, vote_ch))
+            control_embed = discord.Embed(title="\U0001f3ae Match Controls", color=0x5865F2)
+            control_embed.add_field(name="\u26d4 Cancel", value="Vote to cancel the game", inline=True)
+            control_embed.add_field(name="\U0001f3c1 Finish", value="Vote for the winning team & MVPs", inline=True)
+            await safe_send(vote_ch, embed=control_embed, view=MatchControlView(l.id, guild, vote_ch))
+            _spawn(_monitor_team_voice(l, guild, vote_ch))
         except discord.Forbidden as e:
             log.warning("Missing permissions for game room creation: %s", e)
             for cid in [l.t1_vc_id, l.t2_vc_id, l.text_id, l.vote_id, l.category_id]:
@@ -970,9 +1092,9 @@ class LobbyView(View):
         embed.add_field(name=f"\U0001f535 Team 1 ({len(l.team1)})", value="\n".join(m.mention for m in l.team1), inline=True)
         embed.add_field(name=f"\U0001f534 Team 2 ({len(l.team2)})", value="\n".join(m.mention for m in l.team2), inline=True)
         embed.add_field(name="\u200b", value="\u200b", inline=True)
-        embed.set_footer(text="\u23f0 Game in progress \u2022 Use buttons below to end")
+        embed.set_footer(text="\u23f0 Game in progress \u2022 Use the buttons in the #vote channel")
         try:
-            await i.edit_original_response(embed=embed, view=InGameView(l.id))
+            await i.edit_original_response(embed=embed, view=None)
         except:
             pass
 
@@ -993,56 +1115,6 @@ class LobbyView(View):
         except:
             pass
         lobbies.pop(l.id, None)
-
-
-class InGameView(View):
-    def __init__(self, lobby_id):
-        super().__init__(timeout=None)
-        self.lobby_id = lobby_id
-        self._running = False
-
-    @discord.ui.button(label="End Match & Vote", style=discord.ButtonStyle.red, emoji="\U0001f3c1")
-    async def end_game(self, i: discord.Interaction, b: Button):
-        try:
-            lobby = lobbies.get(self.lobby_id)
-            if not lobby:
-                return await self._ephemeral(i, "Game not found.")
-            member_ids = {m.id for m in lobby.team1 + lobby.team2}
-            if i.user.id not in member_ids and not is_admin_user(i):
-                return await self._ephemeral(i, "Only match players can end the match.")
-            if self._running:
-                return await self._ephemeral(i, "Voting is already in progress.")
-            self._running = True
-            try:
-                await i.response.defer()
-            except:
-                return
-            guild = i.guild
-            if not guild:
-                return
-            try:
-                await i.edit_original_response(embed=discord.Embed(title="\U0001f3c1 Match over \u2014 voting is open in the vote channel", color=discord.Color.orange()), view=None)
-            except:
-                pass
-            vote_ch = guild.get_channel(lobby.vote_id) if lobby.vote_id else None
-            try:
-                if vote_ch:
-                    ok = await run_post_game_votes(guild, lobby, vote_ch)
-                else:
-                    ok = False
-                if not ok:
-                    await cleanup_game(lobby, guild)
-            except Exception as e:
-                log.error("post-game votes error: %s", e)
-                await cleanup_game(lobby, guild)
-        except Exception as e:
-            log.error("InGameView end_game error: %s", e)
-
-    async def _ephemeral(self, i, msg):
-        try:
-            await i.response.send_message(msg, ephemeral=True)
-        except:
-            pass
 
 
 class PostGameEndView(View):
