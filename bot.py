@@ -1719,6 +1719,87 @@ async def cmd_setupverify(interaction: discord.Interaction):
             pass
 
 
+@bot.tree.command(name="lockdown", description="[Admin] Hide all channels until users verify (except a verify channel)")
+async def cmd_lockdown(interaction: discord.Interaction, channel: discord.TextChannel = None):
+    if not admin_check(interaction):
+        return await interaction.response.send_message("Only admin.", ephemeral=True)
+    await interaction.response.defer(ephemeral=True)
+    guild = interaction.guild
+    if not guild:
+        return await interaction.followup.send("Guild not found.", ephemeral=True)
+    role = guild.get_role(verify_role_id) or await ensure_verify_role(guild)
+    if not role:
+        return await interaction.followup.send("Could not find/create the Verified role. Run /setupverify first.", ephemeral=True)
+    bot_member = guild.get_member(bot.user.id) if bot.user else None
+    if bot_member and role.position >= bot_member.top_role.position:
+        return await interaction.followup.send("The Verified role is above my highest role. Move it below my role and retry.", ephemeral=True)
+    if not channel:
+        channel = guild.get_channel(verify_channel_id) if verify_channel_id else None
+    if not channel:
+        channel = discord.utils.get(guild.text_channels, name="verify")
+    if not channel:
+        return await interaction.followup.send("Verify channel not found. Pass a channel or run /setupverify first.", ephemeral=True)
+
+    everyone = guild.default_role
+    updated = 0
+    for ch in guild.channels:
+        is_verify = ch.id == channel.id
+        try:
+            if isinstance(ch, discord.TextChannel):
+                if is_verify:
+                    await ch.set_permissions(everyone, view_channel=True, read_messages=True, send_messages=False)
+                else:
+                    await ch.set_permissions(everyone, view_channel=False)
+                await ch.set_permissions(role, view_channel=True, read_messages=True, send_messages=True)
+            elif isinstance(ch, discord.VoiceChannel):
+                if is_verify:
+                    await ch.set_permissions(everyone, view_channel=True, connect=False)
+                else:
+                    await ch.set_permissions(everyone, view_channel=False, connect=False)
+                await ch.set_permissions(role, view_channel=True, connect=True, speak=True)
+            elif isinstance(ch, discord.CategoryChannel):
+                if is_verify:
+                    await ch.set_permissions(everyone, view_channel=True, connect=False)
+                else:
+                    await ch.set_permissions(everyone, view_channel=False, connect=False)
+                await ch.set_permissions(role, view_channel=True, connect=True)
+            updated += 1
+        except discord.Forbidden:
+            continue
+    msg = await safe_fetch_message(channel, verify_message_id) if verify_message_id else None
+    if not msg:
+        try:
+            msg = await channel.send("🔓 **Verification**\nClick the button below to verify and unlock the server!", view=VerifyView())
+            bot.add_view(VerifyView())
+        except discord.Forbidden:
+            pass
+    await interaction.followup.send(
+        f"✅ Lockdown complete — {updated} channels locked.\n"
+        f"Unverified users can only see {channel.mention}. Click the button there to verify.\n"
+        f"Run /unlockdown to undo.",
+        ephemeral=True,
+    )
+
+
+@bot.tree.command(name="unlockdown", description="[Admin] Remove the lockdown (restore @everyone channel access)")
+async def cmd_unlockdown(interaction: discord.Interaction):
+    if not admin_check(interaction):
+        return await interaction.response.send_message("Only admin.", ephemeral=True)
+    await interaction.response.defer(ephemeral=True)
+    guild = interaction.guild
+    if not guild:
+        return await interaction.followup.send("Guild not found.", ephemeral=True)
+    everyone = guild.default_role
+    updated = 0
+    for ch in guild.channels:
+        try:
+            await ch.set_permissions(everyone, overwrite=None)
+            updated += 1
+        except discord.Forbidden:
+            continue
+    await interaction.followup.send(f"✅ Unlocked {updated} channels (removed @everyone overrides).", ephemeral=True)
+
+
 @bot.tree.command(name="admin", description="Admin panel (hidden)")
 async def cmd_admin(interaction: discord.Interaction):
     try:
