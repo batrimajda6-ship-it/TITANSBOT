@@ -1971,7 +1971,7 @@ async def cmd_lockdown(interaction: discord.Interaction, channel: discord.TextCh
     )
 
 
-@bot.tree.command(name="unlockdown", description="[Admin] Remove the lockdown (restore pre-lockdown channel access)")
+@bot.tree.command(name="unlockdown", description="[Admin] Remove the lockdown so everyone can see all channels")
 async def cmd_unlockdown(interaction: discord.Interaction):
     if not admin_check(interaction):
         return await interaction.response.send_message("Only admin.", ephemeral=True)
@@ -1985,32 +1985,23 @@ async def cmd_unlockdown(interaction: discord.Interaction):
     guild_backups = (c.get("lockdown_backup") or {}).get(str(guild.id)) or {}
     updated = 0
     for ch in guild.channels:
-        ch_backup = guild_backups.get(str(ch.id)) or {}
-        targets = [everyone]
-        if role:
-            targets.append(role)
-        for target in targets:
-            entry = ch_backup.get(str(target.id))
-            try:
-                if entry is not None:
-                    p = discord.PermissionOverwrite()
-                    p.allow = int(entry.get("allow", 0))
-                    p.deny = int(entry.get("deny", 0))
-                    await ch.set_permissions(target, overwrite=p)
-                else:
-                    await ch.set_permissions(target, overwrite=None)
-                updated += 1
-            except discord.Forbidden:
-                continue
+        try:
+            if isinstance(ch, discord.TextChannel):
+                await ch.set_permissions(everyone, view_channel=True, read_messages=True, send_messages=True)
+            elif isinstance(ch, discord.VoiceChannel):
+                await ch.set_permissions(everyone, view_channel=True, connect=True, speak=True)
+            elif isinstance(ch, discord.CategoryChannel):
+                await ch.set_permissions(everyone, view_channel=True, connect=True)
+            if role:
+                await ch.set_permissions(role, overwrite=None)
+            updated += 1
+        except discord.Forbidden:
+            continue
     if guild_backups:
         guild_backups.clear()
         c["lockdown_backup"] = guild_backups
         save_config(c)
-    await interaction.followup.send(
-        f"✅ Unlocked {updated} channels (restored pre-lockdown permissions).\n"
-        f"If members still can't see channels, run /lockdown then /unlockdown again, or move the Verified role below my top role.",
-        ephemeral=True,
-    )
+    await interaction.followup.send(f"✅ Unlocked {updated} channels — everyone can see them now.", ephemeral=True)
 
 
 @bot.tree.command(name="admin", description="Admin panel (hidden)")
