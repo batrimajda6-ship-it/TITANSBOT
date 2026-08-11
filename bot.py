@@ -1983,15 +1983,33 @@ async def cmd_unlockdown(interaction: discord.Interaction):
     role = guild.get_role(verify_role_id)
     c = load_config()
     guild_backups = (c.get("lockdown_backup") or {}).get(str(guild.id)) or {}
+    view_flag = discord.Permissions.view_channel.flag
     updated = 0
     for ch in guild.channels:
+        ch_backup = guild_backups.get(str(ch.id)) or {}
+        ev = ch_backup.get(str(everyone.id))
+        is_public = True
+        if ev is not None:
+            allow = int(ev.get("allow", 0))
+            deny = int(ev.get("deny", 0))
+            if (deny & view_flag) and not (allow & view_flag):
+                is_public = False
         try:
-            if isinstance(ch, discord.TextChannel):
-                await ch.set_permissions(everyone, view_channel=True, read_messages=True, send_messages=True)
-            elif isinstance(ch, discord.VoiceChannel):
-                await ch.set_permissions(everyone, view_channel=True, connect=True, speak=True)
-            elif isinstance(ch, discord.CategoryChannel):
-                await ch.set_permissions(everyone, view_channel=True, connect=True)
+            if is_public:
+                if isinstance(ch, discord.TextChannel):
+                    await ch.set_permissions(everyone, view_channel=True, read_messages=True, send_messages=True)
+                elif isinstance(ch, discord.VoiceChannel):
+                    await ch.set_permissions(everyone, view_channel=True, connect=True, speak=True)
+                elif isinstance(ch, discord.CategoryChannel):
+                    await ch.set_permissions(everyone, view_channel=True, connect=True)
+            else:
+                if ev is not None:
+                    p = discord.PermissionOverwrite()
+                    p.allow = int(ev.get("allow", 0))
+                    p.deny = int(ev.get("deny", 0))
+                    await ch.set_permissions(everyone, overwrite=p)
+                else:
+                    await ch.set_permissions(everyone, overwrite=None)
             if role:
                 await ch.set_permissions(role, overwrite=None)
             updated += 1
@@ -2001,7 +2019,7 @@ async def cmd_unlockdown(interaction: discord.Interaction):
         guild_backups.clear()
         c["lockdown_backup"] = guild_backups
         save_config(c)
-    await interaction.followup.send(f"✅ Unlocked {updated} channels — everyone can see them now.", ephemeral=True)
+    await interaction.followup.send(f"✅ Unlocked {updated} channels — public ones are now open, private ones stay hidden.", ephemeral=True)
 
 
 @bot.tree.command(name="admin", description="Admin panel (hidden)")
