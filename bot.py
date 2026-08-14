@@ -1583,8 +1583,17 @@ async def cmd_setrankchannel(interaction: discord.Interaction, channel: discord.
         guild = interaction.guild
         if not guild:
             return await interaction.followup.send("Must run inside a server.", ephemeral=True)
+        bot_member = guild.get_member(bot.user.id) if bot.user else None
+        if not bot_member:
+            return await interaction.followup.send("I can't find myself in this server. Re-invite me.", ephemeral=True)
+        if not bot_member.guild_permissions.manage_roles:
+            return await interaction.followup.send("❌ I need the **Manage Roles** permission in this server to give/remove roles. Grant it (Server Settings → Roles → the bot's role) and try again.", ephemeral=True)
         await ensure_apostado_role(guild)
         await ensure_rank_role(guild)
+        for rname, role in (("APOSTADO PLAYER", guild.get_role(_guild_setting(guild.id, "apostado_role_id") or apostado_role_id)), ("Rank", guild.get_role(_guild_setting(guild.id, "rank_role_id") or rank_role_id))):
+            if role and role.position >= bot_member.top_role.position:
+                await interaction.followup.send(f"❌ The **{rname}** role is above my role in Server Settings → Roles. Move my role (top one) **above** it, then rerun /setrankchannel.", ephemeral=True)
+                return
         _set_guild_setting(guild.id, rank_channel_id=channel.id, apostado_channel_id=channel.id)
         rank_channel_id = channel.id
         apostado_channel_id = channel.id
@@ -1633,6 +1642,40 @@ async def cmd_setrankchannel(interaction: discord.Interaction, channel: discord.
                 await interaction.followup.send(f"✅ Channel set to {channel.mention}, but I couldn't send the message there (missing permission).", ephemeral=True)
     except Exception as e:
         log.error("setrankchannel error: %s", e)
+
+
+@bot.tree.command(name="diagnose", description="[Admin] Check why reaction roles may not be working in this server")
+async def cmd_diagnose(interaction: discord.Interaction):
+    try:
+        if not admin_check(interaction):
+            return await interaction.response.send_message("Only admin.", ephemeral=True)
+        await interaction.response.defer(ephemeral=True)
+        guild = interaction.guild
+        if not guild:
+            return await interaction.followup.send("Must run inside a server.", ephemeral=True)
+        bot_member = guild.get_member(bot.user.id) if bot.user else None
+        gs = _guild_settings(guild.id)
+        lines = []
+        lines.append(f"**Guild:** {guild.name} ({guild.id})")
+        lines.append(f"**Bot role:** {'@' + bot_member.top_role.name if bot_member else 'N/A'} (pos {bot_member.top_role.position if bot_member else '?'})")
+        lines.append(f"**Manage Roles:** {bool(bot_member and bot_member.guild_permissions.manage_roles)}")
+        arole = guild.get_role(gs.get("apostado_role_id") or apostado_role_id)
+        rrole = guild.get_role(gs.get("rank_role_id") or rank_role_id)
+        if not arole:
+            arole = discord.utils.get(guild.roles, name=APOSTADO_ROLE_NAME)
+        if not rrole:
+            rrole = discord.utils.get(guild.roles, name=ROLE_NAME)
+        lines.append(f"**APOSTADO role:** {'@' + arole.name + ' (pos ' + str(arole.position) + ')' if arole else 'MISSING'}" + (f" — ⚠️ ABOVE BOT, move bot's role up" if (arole and bot_member and arole.position >= bot_member.top_role.position) else ""))
+        lines.append(f"**Rank role:** {'@' + rrole.name + ' (pos ' + str(rrole.position) + ')' if rrole else 'MISSING'}" + (f" — ⚠️ ABOVE BOT, move bot's role up" if (rrole and bot_member and rrole.position >= bot_member.top_role.position) else ""))
+        cid = gs.get("rank_channel_id") or rank_channel_id
+        achid = gs.get("apostado_channel_id") or apostado_channel_id
+        lines.append(f"**Saved channel (this server):** {guild.get_channel(cid).mention if cid and guild.get_channel(cid) else str(cid)}")
+        lines.append(f"**Saved 🏆 message:** {gs.get('rank_message_id') or rank_message_id}")
+        lines.append(f"**Channel checks:** rank_match={'YES' if cid else 'no'}, apostado_match={'YES' if achid else 'no'}")
+        embed = discord.Embed(title="🔍 Diagnose", color=0x5865F2, description="\n".join(lines))
+        await interaction.followup.send(embed=embed, ephemeral=True)
+    except Exception as e:
+        log.error("diagnose command error: %s", e)
 
 
 @bot.tree.command(name="mergeroles", description="[Admin] Merge two roles into one APOSTADO PLAYER role (blue)")
