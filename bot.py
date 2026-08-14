@@ -58,17 +58,10 @@ COOLDOWN_ADMIN = 1
 COOLDOWN_LOBBIES = 2
 
 # ── Score cache ───────────────────────────────────────────────────────
-_score_cache = {}
-_score_cache_time = 0
-_SCORE_CACHE_TTL = 30  # seconds
+_score_cache = None  # in-memory source of truth (lazily loaded once)
 
 def get_scores_cached():
-    global _score_cache, _score_cache_time
-    now = datetime.datetime.now().timestamp()
-    if now - _score_cache_time > _SCORE_CACHE_TTL:
-        _score_cache = load_scores()
-        _score_cache_time = now
-    return _score_cache
+    return load_scores()
 
 
 DB_INIT = """
@@ -111,6 +104,9 @@ def init_db():
         raise
 
 def load_scores():
+    global _score_cache
+    if _score_cache is not None:
+        return _score_cache
     try:
         db = get_db()
         rows = db.execute("SELECT guild_id, user_id, name, points, wins, losses, mvp_wins, mvp_losses FROM scores").fetchall()
@@ -128,6 +124,7 @@ def load_scores():
                 "mvp_wins": r["mvp_wins"],
                 "mvp_losses": r["mvp_losses"],
             }
+        _score_cache = data
         return data
     except Exception as e:
         log.error("load_scores error: %s", e)
@@ -135,9 +132,8 @@ def load_scores():
 
 def save_scores(data):
     try:
-        global _score_cache, _score_cache_time
-        _score_cache = {}
-        _score_cache_time = 0
+        global _score_cache
+        _score_cache = data
         db = get_db()
         for gid, users in data.items():
             for uid, u in users.items():
@@ -164,25 +160,15 @@ def update_scores(guild_id, mutator):
 
 def get_user_data(guild_id, user_id, username):
     try:
-        db = get_db()
+        data = load_scores()
         gid_str = str(guild_id)
         uid_str = str(user_id)
-        row = db.execute("SELECT * FROM scores WHERE guild_id=? AND user_id=?", (gid_str, uid_str)).fetchone()
-        rows_all = db.execute("SELECT * FROM scores WHERE guild_id=?", (gid_str,)).fetchall()
-        g = {}
-        for r in rows_all:
-            g[str(r["user_id"])] = {
-                "name": r["name"], "points": r["points"], "wins": r["wins"],
-                "losses": r["losses"], "mvp_wins": r["mvp_wins"], "mvp_losses": r["mvp_losses"],
-            }
-        if row:
-            db.close()
+        g = data.setdefault(gid_str, {})
+        if uid_str in g:
             return {gid_str: g}, g[uid_str]
-        db.execute("INSERT INTO scores (guild_id, user_id, name) VALUES (?,?,?)", (gid_str, uid_str, username))
-        db.commit()
         u = {"name": username, "points": 0, "wins": 0, "losses": 0, "mvp_wins": 0, "mvp_losses": 0}
         g[uid_str] = u
-        db.close()
+        save_scores(data)
         return {gid_str: g}, u
     except Exception as e:
         log.error("get_user_data error: %s", e)
