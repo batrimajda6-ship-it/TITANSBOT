@@ -257,17 +257,21 @@ async def safe_nick_edit(member, new_nick, retries=2):
     finally:
         _nick_editing.discard(member.id)
 
+_role_op_lock = asyncio.Lock()
+
 async def safe_add_role(member, role, retries=2):
     for attempt in range(retries + 1):
         try:
-            if role not in member.roles:
-                await member.add_roles(role, reason="TitansBot rank")
+            async with _role_op_lock:
+                if role not in member.roles:
+                    await member.add_roles(role, reason="TitansBot rank")
             return True
         except discord.Forbidden:
             return False
         except discord.HTTPException as e:
             if e.status == 429 and attempt < retries:
-                await asyncio.sleep(2 ** attempt + random.uniform(0, 1))
+                retry_after = (getattr(e, "retry_after", None) or (2 ** attempt)) + 0.5
+                await asyncio.sleep(min(retry_after, 30))
                 continue
             return False
     return False
@@ -275,14 +279,16 @@ async def safe_add_role(member, role, retries=2):
 async def safe_remove_role(member, role, retries=2):
     for attempt in range(retries + 1):
         try:
-            if role in member.roles:
-                await member.remove_roles(role, reason="TitansBot rank")
+            async with _role_op_lock:
+                if role in member.roles:
+                    await member.remove_roles(role, reason="TitansBot rank")
             return True
         except discord.Forbidden:
             return False
         except discord.HTTPException as e:
             if e.status == 429 and attempt < retries:
-                await asyncio.sleep(2 ** attempt + random.uniform(0, 1))
+                retry_after = (getattr(e, "retry_after", None) or (2 ** attempt)) + 0.5
+                await asyncio.sleep(min(retry_after, 30))
                 continue
             return False
     return False
@@ -351,6 +357,27 @@ def _spawn(coro):
 
 _recalc_locks: dict = {}
 _maintenance_started = False
+
+RECALC_MIN_INTERVAL = 30
+_recalc_pending: dict = {}
+
+def schedule_recalc(guild):
+    if not guild:
+        return
+    gid = guild.id
+    if _recalc_pending.get(gid):
+        return
+    _recalc_pending[gid] = True
+    _spawn(_run_recalc_later(guild))
+
+async def _run_recalc_later(guild):
+    try:
+        await asyncio.sleep(RECALC_MIN_INTERVAL)
+        await recalculate_all_ranks(guild)
+    except Exception as e:
+        log.error("scheduled recalc error in %s: %s", guild.name, e)
+    finally:
+        _recalc_pending.pop(guild.id, None)
 
 
 async def recalculate_all_ranks(guild):
@@ -682,7 +709,7 @@ async def _apply_match_results(guild, lobby, win_team, lose_team, win_mvp, lose_
             u[key] += 1
 
     update_scores(gid, _apply)
-    _spawn(recalculate_all_ranks(guild))
+    schedule_recalc(guild)
     return tracked_ids
 
 
@@ -1881,7 +1908,7 @@ async def cmd_restore(interaction: discord.Interaction, attachment: discord.Atta
             return await interaction.response.send_message("Invalid format.", ephemeral=True)
         save_scores(data)
         for guild in bot.guilds:
-            _spawn(recalculate_all_ranks(guild))
+            schedule_recalc(guild)
         player_count = sum(len(g) for g in data.values()) if data else 0
         await interaction.response.send_message(f"✅ Restored scores for {player_count} players! Nicknames being refreshed.", ephemeral=True)
     except Exception as e:
@@ -2055,7 +2082,7 @@ async def _handle_rank_reaction(guild, user_id, add):
                 ok = await safe_remove_role(member, access_role)
                 if not ok:
                     log.warning("Failed to remove access role from %s in %s", member.id, guild.name)
-        _spawn(recalculate_all_ranks(guild))
+        schedule_recalc(guild)
     except Exception as e:
         log.error("_handle_rank_reaction error: %s", e)
 
@@ -2157,7 +2184,7 @@ async def maintenance_loop():
                     await ensure_apostado_role(guild)
                 except Exception as e:
                     log.error("maintenance ensure error in %s: %s", guild.name, e)
-                _spawn(recalculate_all_ranks(guild))
+                schedule_recalc(guild)
     except asyncio.CancelledError:
         pass
     except Exception as e:
@@ -2184,7 +2211,7 @@ async def on_ready():
             await bot.tree.sync(guild=guild)
         except Exception as e:
             log.error("sync failed for %s: %s", guild.name, e)
-        _spawn(recalculate_all_ranks(guild))
+        schedule_recalc(guild)
     await ensure_stay_voice()
     if not _maintenance_started:
         _maintenance_started = True
@@ -2203,7 +2230,7 @@ async def on_guild_join(guild):
             await bot.tree.sync(guild=guild)
         except Exception as e:
             log.error("on_guild_join sync error in %s: %s", guild.name, e)
-        _spawn(recalculate_all_ranks(guild))
+        schedule_recalc(guild)
     except Exception as e:
         log.error("on_guild_join error in %s: %s", guild.name, e)
 
@@ -2227,7 +2254,7 @@ async def on_member_update(before, after):
                 await safe_nick_edit(after, base)
             return
         if has_rank and not had_rank:
-            _spawn(recalculate_all_ranks(guild))
+            schedule_recalc(guild)
     except Exception as e:
         log.error("on_member_update error: %s", e)
 
@@ -2236,7 +2263,7 @@ async def on_member_update(before, after):
 async def on_member_remove(member):
     try:
         if member.guild:
-            _spawn(recalculate_all_ranks(member.guild))
+            schedule_recalc(member.guild)
     except Exception as e:
         log.error("on_member_remove error: %s", e)
 
