@@ -352,8 +352,28 @@ _background_tasks: set = set()
 def _spawn(coro):
     task = asyncio.create_task(coro)
     _background_tasks.add(task)
-    task.add_done_callback(_background_tasks.discard)
+    def _done(t):
+        _background_tasks.discard(t)
+        if not t.cancelled():
+            exc = t.exception()
+            if exc:
+                log.error("Background task failed: %s", exc)
+    task.add_done_callback(_done)
     return task
+
+def _setup_loop_handler():
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    def _handler(loop_, context):
+        exc = context.get("exception")
+        msg = context.get("message", "Unknown event loop error")
+        if exc:
+            log.error("Unhandled event loop error: %s: %s", msg, exc)
+        else:
+            log.error("Event loop error: %s", msg)
+    loop.set_exception_handler(_handler)
 
 _recalc_locks: dict = {}
 _maintenance_started = False
@@ -2203,16 +2223,22 @@ async def on_ready():
     except Exception as e:
         log.error("Global sync failed: %s", e)
     for guild in bot.guilds:
-        await ensure_rank_role(guild)
-        await ensure_get_rank_channel(guild)
-        await ensure_apostado_role(guild)
+        try:
+            await ensure_rank_role(guild)
+            await ensure_get_rank_channel(guild)
+            await ensure_apostado_role(guild)
+        except Exception as e:
+            log.error("on_ready ensure error in %s: %s", guild.name, e)
         try:
             bot.tree.copy_global_to(guild=guild)
             await bot.tree.sync(guild=guild)
         except Exception as e:
             log.error("sync failed for %s: %s", guild.name, e)
         schedule_recalc(guild)
-    await ensure_stay_voice()
+    try:
+        await ensure_stay_voice()
+    except Exception as e:
+        log.error("on_ready ensure_stay_voice error: %s", e)
     if not _maintenance_started:
         _maintenance_started = True
         _spawn(maintenance_loop())
@@ -2316,6 +2342,19 @@ async def on_raw_reaction_remove(payload):
 @bot.event
 async def on_command_error(ctx, error):
     log.warning("Prefix command error: %s", error)
+
+
+@bot.tree.error
+async def on_tree_error(interaction: discord.Interaction, error: Exception):
+    log.error("Slash command '%s' error: %s", interaction.command.name if interaction.command else "?", error)
+    try:
+        msg = "Something went wrong. This has been logged."
+        if interaction.response.is_done():
+            await interaction.followup.send(msg, ephemeral=True)
+        else:
+            await interaction.response.send_message(msg, ephemeral=True)
+    except Exception:
+        pass
 
 
 DISCORD_LINK_RE = re.compile(
@@ -2519,19 +2558,23 @@ if __name__ == "__main__":
     init_db()
     threading.Thread(target=run_http_server, daemon=True).start()
     async def start():
-        for i in range(10):
+        _setup_loop_handler()
+        attempt = 0
+        while True:
+            attempt += 1
             try:
                 await bot.start(TOKEN)
                 return
-            except discord.HTTPException as e:
-                wait = min(30 * (2 ** i), 600)
+            except asyncio.CancelledError:
+                raise
+            except (discord.HTTPException, discord.GatewayNotFound, discord.ConnectionClosed,
+                    discord.PrivilegedIntentsRequired, ConnectionError, OSError) as e:
+                wait = min(30 * (2 ** attempt), 600)
                 jitter = random.uniform(0, 5)
-                log.warning("Discord %s, retrying in %.0fs (attempt %d/10)", e.status, wait + jitter, i+1)
-                await asyncio.sleep(wait + jitter)
+                log.warning("Discord connection error (%s), retrying in %.0fs (attempt %d)", e, wait + jitter, attempt)
             except Exception as e:
-                log.critical("Fatal startup error: %s", e)
-                if i < 9:
-                    await asyncio.sleep(10)
-                else:
-                    raise
+                wait = min(30 * (2 ** attempt), 600)
+                jitter = random.uniform(0, 5)
+                log.critical("Unexpected startup error: %s — retrying in %.0fs (attempt %d)", e, wait + jitter, attempt)
+            await asyncio.sleep(wait + jitter)
     asyncio.run(start())
