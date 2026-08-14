@@ -196,6 +196,25 @@ def save_config(cfg):
             except:
                 pass
 
+def _guild_settings(guild_id):
+    try:
+        return (load_config().get("guild_settings") or {}).get(str(guild_id)) or {}
+    except Exception:
+        return {}
+
+def _guild_setting(guild_id, key, default=None):
+    return _guild_settings(guild_id).get(key, default)
+
+def _set_guild_setting(guild_id, **kwargs):
+    try:
+        c = load_config()
+        gs = c.setdefault("guild_settings", {})
+        g = gs.setdefault(str(guild_id), {})
+        g.update(kwargs)
+        save_config(c)
+    except Exception as e:
+        log.error("set guild setting error: %s", e)
+
 cfg = load_config()
 rank_message_id = cfg.get("rank_message_id", 1508197095385858120)
 rank_channel_id = cfg.get("rank_channel_id", None)
@@ -1554,7 +1573,7 @@ async def cmd_syncrank(interaction: discord.Interaction):
         log.error("syncrank error: %s", e)
 
 
-@bot.tree.command(name="setrankchannel", description="Set the channel where 🏆 reactions grant the APOSTADO PLAYER role")
+@bot.tree.command(name="setrankchannel", description="Set the channel where 🏆 reactions grant the APOSTADO PLAYER role (per server)")
 async def cmd_setrankchannel(interaction: discord.Interaction, channel: discord.TextChannel):
     try:
         global rank_message_id, rank_channel_id, apostado_channel_id
@@ -1562,7 +1581,11 @@ async def cmd_setrankchannel(interaction: discord.Interaction, channel: discord.
             return await interaction.response.send_message("Only admin.", ephemeral=True)
         await interaction.response.defer(ephemeral=True)
         guild = interaction.guild
-        role = await ensure_apostado_role(guild) if guild else None
+        if not guild:
+            return await interaction.followup.send("Must run inside a server.", ephemeral=True)
+        await ensure_apostado_role(guild)
+        await ensure_rank_role(guild)
+        _set_guild_setting(guild.id, rank_channel_id=channel.id, apostado_channel_id=channel.id)
         rank_channel_id = channel.id
         apostado_channel_id = channel.id
         cfg = load_config()
@@ -1578,6 +1601,7 @@ async def cmd_setrankchannel(interaction: discord.Interaction, channel: discord.
         except:
             pass
         if msg:
+            _set_guild_setting(guild.id, rank_message_id=msg.id)
             rank_message_id = msg.id
             cfg["rank_message_id"] = msg.id
             save_config(cfg)
@@ -1599,6 +1623,7 @@ async def cmd_setrankchannel(interaction: discord.Interaction, channel: discord.
             try:
                 msg = await channel.send("React with 🏆 to get the **APOSTADO PLAYER** role and play with the bot!\n\nUnreacting removes the role.")
                 await msg.add_reaction("🏆")
+                _set_guild_setting(guild.id, rank_message_id=msg.id)
                 rank_message_id = msg.id
                 cfg["rank_message_id"] = msg.id
                 save_config(cfg)
@@ -1924,7 +1949,10 @@ async def cmd_restore(interaction: discord.Interaction, attachment: discord.Atta
 async def ensure_rank_role(guild):
     global rank_role_id
     try:
-        role = guild.get_role(rank_role_id)
+        role = None
+        rid = _guild_setting(guild.id, "rank_role_id") or rank_role_id
+        if rid:
+            role = guild.get_role(rid)
         if not role:
             role = discord.utils.get(guild.roles, name=ROLE_NAME)
         if not role:
@@ -1934,6 +1962,7 @@ async def ensure_rank_role(guild):
             else:
                 log.warning("Missing manage_roles permission in %s", guild.name)
                 return None
+        _set_guild_setting(guild.id, rank_role_id=role.id)
         if role.id != rank_role_id:
             rank_role_id = role.id
             c = load_config()
@@ -1951,23 +1980,27 @@ async def ensure_rank_role(guild):
 async def ensure_get_rank_channel(guild):
     global rank_message_id, rank_channel_id
     try:
+        gs = _guild_settings(guild.id)
         target = None
-        if rank_channel_id:
-            target = guild.get_channel(rank_channel_id)
+        cid = gs.get("rank_channel_id") or rank_channel_id
+        if cid:
+            target = guild.get_channel(cid)
         if not target:
             target = discord.utils.get(guild.text_channels, name="get-rank")
         if not target:
             log.warning("No get-rank channel found in %s; set one with /setrankchannel. Not auto-creating.", guild.name)
             return None
-        if rank_message_id:
+        mid = gs.get("rank_message_id") or rank_message_id
+        if mid:
             try:
-                msg = await target.fetch_message(rank_message_id)
+                msg = await target.fetch_message(mid)
                 return target
             except:
                 pass
         try:
             msg = await target.send("React with 🏆 to get the **APOSTADO PLAYER** role and access to the bot!\n\nYour nickname will also be tracked with a rank based on points.")
             await msg.add_reaction("🏆")
+            _set_guild_setting(guild.id, rank_message_id=msg.id, rank_channel_id=target.id)
             rank_message_id = msg.id
             rank_channel_id = target.id
             c = load_config()
@@ -1986,7 +2019,10 @@ async def ensure_get_rank_channel(guild):
 async def ensure_apostado_role(guild):
     global apostado_role_id
     try:
-        role = guild.get_role(apostado_role_id)
+        role = None
+        rid = _guild_setting(guild.id, "apostado_role_id") or apostado_role_id
+        if rid:
+            role = guild.get_role(rid)
         if not role:
             role = discord.utils.get(guild.roles, name=APOSTADO_ROLE_NAME)
         if not role:
@@ -1996,6 +2032,7 @@ async def ensure_apostado_role(guild):
             else:
                 log.warning("Missing manage_roles permission in %s", guild.name)
                 return None
+        _set_guild_setting(guild.id, apostado_role_id=role.id)
         if role.id != apostado_role_id:
             apostado_role_id = role.id
             c = load_config()
@@ -2022,7 +2059,11 @@ async def _handle_apostado_reaction(guild, user_id, add):
                 return
         if not member or member.bot:
             return
-        role = guild.get_role(apostado_role_id)
+        role = guild.get_role(_guild_setting(guild.id, "apostado_role_id") or apostado_role_id)
+        if not role:
+            role = discord.utils.get(guild.roles, name=APOSTADO_ROLE_NAME)
+        if not role:
+            role = await ensure_apostado_role(guild)
         if not role:
             return
         bot_member = guild.get_member(bot.user.id) if bot.user else None
@@ -2045,7 +2086,10 @@ def _is_apostado_channel(guild, channel_id):
     ch = guild.get_channel(channel_id)
     if not ch:
         return False
-    return channel_id == apostado_channel_id
+    cid = _guild_setting(guild.id, "apostado_channel_id") or apostado_channel_id
+    if cid and channel_id == cid:
+        return True
+    return "apostado" in ch.name.lower()
 
 
 async def _handle_rank_reaction(guild, user_id, add):
@@ -2060,8 +2104,16 @@ async def _handle_rank_reaction(guild, user_id, add):
                 return
         if not member or member.bot:
             return
-        role = guild.get_role(rank_role_id)
-        access_role = guild.get_role(apostado_role_id) or await ensure_apostado_role(guild)
+        role = guild.get_role(_guild_setting(guild.id, "rank_role_id") or rank_role_id)
+        if not role:
+            role = discord.utils.get(guild.roles, name=ROLE_NAME)
+        if not role:
+            role = await ensure_rank_role(guild)
+        access_role = guild.get_role(_guild_setting(guild.id, "apostado_role_id") or apostado_role_id)
+        if not access_role:
+            access_role = discord.utils.get(guild.roles, name=APOSTADO_ROLE_NAME)
+        if not access_role:
+            access_role = await ensure_apostado_role(guild)
         bot_member = guild.get_member(bot.user.id) if bot.user else None
         if role and bot_member and role.position >= bot_member.top_role.position:
             log.warning("Rank role is above bot's top role in %s", guild.name)
@@ -2100,8 +2152,9 @@ def _is_rank_channel(guild, channel_id):
         return False
     if ch.name == "get-rank":
         return True
-    if rank_channel_id:
-        return channel_id == rank_channel_id
+    cid = _guild_setting(guild.id, "rank_channel_id") or rank_channel_id
+    if cid:
+        return channel_id == cid
     return False
 
 
