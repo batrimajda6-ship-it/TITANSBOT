@@ -816,7 +816,8 @@ async def _cancel_vote_flow(lobby, guild, vote_ch):
         await safe_send(vote_ch, embed=discord.Embed(title="\u274c Game cancelled by vote", color=0xed4245))
         await cleanup_game(lobby, guild)
     else:
-        await safe_send(vote_ch, embed=discord.Embed(title="\u25b6\ufe0f Game continues", description="Vote decided: keep playing. Use **Finish** in this channel when it's over.", color=0x3BA55C))
+        await safe_send(vote_ch, embed=discord.Embed(title="\u25b6\ufe0f Game continues", description="Vote decided: keep playing. Use \U0001f3c6 **MVP** here when the game ends.", color=0x3BA55C))
+        await safe_send(vote_ch, "\U0001f3ae Match Controls", view=MatchControlView(lobby.id, guild, vote_ch))
 
 
 async def _monitor_team_voice(lobby, guild, vote_ch):
