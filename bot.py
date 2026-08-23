@@ -587,6 +587,8 @@ class MatchVote:
         self.question = question
         self.options = options          # list of (value, label)
         self.voters = set(voters)
+        self.t1_voters = {m.id for m in (lobby.team1 if lobby else [])} & self.voters
+        self.t2_voters = {m.id for m in (lobby.team2 if lobby else [])} & self.voters
         self.votes = {}
         self.closed = False
         self.result = None
@@ -601,6 +603,12 @@ class MatchVote:
                 tally[val] += 1
         return tally
 
+    def is_complete(self):
+        voted = set(self.votes)
+        t1_ok = not self.t1_voters or bool(voted & self.t1_voters)
+        t2_ok = not self.t2_voters or bool(voted & self.t2_voters)
+        return t1_ok and t2_ok
+
     def most_votes(self):
         tally = self.tally
         top = max(tally.values()) if tally else 0
@@ -612,7 +620,7 @@ def vote_embed(vote, final=False):
     labels = dict(vote.options)
     lines = "\n".join(f"**{labels.get(val, val)}** \u2014 {vote.tally.get(val, 0)} vote(s)" for val, _ in vote.options)
     embed = discord.Embed(title=vote.question, description=lines or "_No options_", color=0x3BA55C if final else 0x5865F2)
-    embed.set_footer(text="Each match player votes once \u2014 the most votes decide")
+    embed.set_footer(text="1 vote from each team decides \u2014 closes as soon as both teams have voted")
     if final and vote.result is not None:
         embed.add_field(name="\U0001f4ca Result", value=labels.get(vote.result, str(vote.result)), inline=False)
     return embed
@@ -648,7 +656,7 @@ class VoteView(View):
                         await i.message.edit(embed=vote_embed(v), view=self)
                 except:
                     pass
-                if len(v.votes) >= len(v.voters):
+                if v.is_complete():
                     v.closed = True
                     v.result = v.most_votes()
                     for child in self.children:
@@ -788,7 +796,7 @@ async def run_post_game_votes(guild, lobby, vote_ch):
     embed.set_footer(text="\u2705 Points updated \u2022 decided by player votes")
     await safe_send(vote_ch, embed=embed)
     await _move_back_players(lobby, guild)
-    await safe_send(vote_ch, "Choose next action:", view=PostGameEndView(lobby.id, guild))
+    await safe_send(vote_ch, "\U0001f3c6 Points updated! Will you keep playing or finish?", view=PostGameEndView(lobby.id, guild))
     return True
 
 
@@ -895,29 +903,28 @@ class MatchControlView(View):
             pass
         _spawn(_cancel_vote_flow(lobby, self.guild, self.vote_ch))
 
-    @discord.ui.button(label="Finish", style=discord.ButtonStyle.green, emoji="\U0001f3c1")
-    async def finish(self, i: discord.Interaction, b: Button):
+    @discord.ui.button(label="MVP", style=discord.ButtonStyle.green, emoji="\U0001f3c6")
+    async def mvp(self, i: discord.Interaction, b: Button):
         lobby = await self._can_act(i)
         if not lobby:
             return await self._ephemeral(i, "You're not part of this match.")
         if self._busy:
             return await self._ephemeral(i, "An action is already running.")
         self._busy = True
-        lobby.finished = True
         await self._disable(i)
         try:
             await i.response.defer()
         except:
             pass
-        _spawn(self._finish_flow(lobby))
+        _spawn(self._mvp_flow(lobby))
 
-    async def _finish_flow(self, lobby):
+    async def _mvp_flow(self, lobby):
         try:
             ok = await run_post_game_votes(self.guild, lobby, self.vote_ch)
             if not ok:
                 await cleanup_game(lobby, self.guild)
         except Exception as e:
-            log.error("finish flow error: %s", e)
+            log.error("mvp flow error: %s", e)
             await cleanup_game(lobby, self.guild)
 
 
@@ -1107,11 +1114,11 @@ class LobbyView(View):
             msg = f"## \U0001f3ae Match Live!\n\U0001f194 **Match ID:** `{l.match_id}` \U0001f511 **Password:** `{l.password}`"
             if l.key:
                 msg += f" \U0001f510 **Key:** `{l.key}`"
-            msg += "\n\nUse the **\u26d4 Cancel** or **\U0001f3c1 Finish** buttons in the **#vote** channel. Everyone must stay in their team voice channel."
+            msg += "\n\nUse the **\u26d4 Cancel** or **\U0001f3c6 MVP** buttons in the **#vote** channel. Everyone must stay in their team voice channel."
             await safe_send(text, msg)
             control_embed = discord.Embed(title="\U0001f3ae Match Controls", color=0x5865F2)
             control_embed.add_field(name="\u26d4 Cancel", value="Vote to cancel the game", inline=True)
-            control_embed.add_field(name="\U0001f3c1 Finish", value="Vote for the winning team & MVPs", inline=True)
+            control_embed.add_field(name="\U0001f3c6 MVP", value="Vote winner team & MVPs \u2014 then keep playing or finish", inline=True)
             await safe_send(vote_ch, embed=control_embed, view=MatchControlView(l.id, guild, vote_ch))
             _spawn(_monitor_team_voice(l, guild, vote_ch))
         except discord.Forbidden as e:
@@ -1178,8 +1185,8 @@ class PostGameEndView(View):
         self.lobby_id = lobby_id
         self.guild = guild
 
-    @discord.ui.button(label="\U0001f504 Rematch", style=discord.ButtonStyle.green)
-    async def rematch(self, i: discord.Interaction, b: Button):
+    @discord.ui.button(label="\u25b6\ufe0f Keep Playing", style=discord.ButtonStyle.green)
+    async def keep_playing(self, i: discord.Interaction, b: Button):
         try:
             lobby = lobbies.get(self.lobby_id)
             if not lobby:
@@ -1191,24 +1198,21 @@ class PostGameEndView(View):
                 await i.response.defer(ephemeral=True)
             except:
                 return
-            new_lid = f"{lobby.creator.id}_{datetime.datetime.now().timestamp()}"
-            new_lobby = Lobby(new_lid, lobby.mode, lobby.creator, lobby.channel)
-            new_lobby.match_id = lobby.match_id
-            new_lobby.password = lobby.password
-            new_lobby.key = lobby.key
-            for m in lobby.team1: new_lobby.team1.append(m)
-            for m in lobby.team2: new_lobby.team2.append(m)
-            lobbies[new_lid] = new_lobby
-            if lobby.channel:
-                msg = await safe_send(lobby.channel, embed=build_embed(new_lobby), view=LobbyView(new_lobby))
-                if msg:
-                    new_lobby.message_id = msg.id
             try:
-                await i.followup.send(f"Rematch created!", ephemeral=True)
+                for child in self.children:
+                    child.disabled = True
+                await i.message.edit(view=self)
             except:
                 pass
+            vote_ch = self.guild.get_channel(lobby.vote_id) if self.guild else None
+            if vote_ch:
+                await safe_send(
+                    vote_ch,
+                    "\u25b6\ufe0f Game continues \u2014 same teams, same channels! Use \U0001f3c6 **MVP** here when the next game ends.",
+                    view=MatchControlView(lobby.id, self.guild, vote_ch),
+                )
         except Exception as e:
-            log.error("rematch error: %s", e)
+            log.error("keep playing error: %s", e)
 
     @discord.ui.button(label="\u26d4 End Game", style=discord.ButtonStyle.red)
     async def end(self, i: discord.Interaction, b: Button):
