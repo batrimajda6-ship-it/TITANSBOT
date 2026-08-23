@@ -795,7 +795,6 @@ async def run_post_game_votes(guild, lobby, vote_ch):
     embed.add_field(name="\u200b", value="\u200b", inline=True)
     embed.set_footer(text="\u2705 Points updated \u2022 decided by player votes")
     await safe_send(vote_ch, embed=embed)
-    await _move_back_players(lobby, guild)
     await safe_send(vote_ch, "\U0001f3c6 Points updated! Will you keep playing or finish?", view=PostGameEndView(lobby.id, guild))
     return True
 
