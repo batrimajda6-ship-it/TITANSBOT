@@ -1087,9 +1087,16 @@ class LobbyView(View):
             vc2 = await guild.create_voice_channel("Team 2", category=category, overwrites=t2_overwrites)
             l.t1_vc_id = vc1.id
             l.t2_vc_id = vc2.id
-            text = await guild.create_text_channel("lobby", category=category)
+            def _text_overwrites():
+                ow = {guild.default_role: discord.PermissionOverwrite(view_channel=False, send_messages=False)}
+                for m in l.team1 + l.team2:
+                    ow[m] = discord.PermissionOverwrite(
+                        view_channel=True, send_messages=True, read_message_history=True, embed_links=True
+                    )
+                return ow
+            text = await guild.create_text_channel("lobby", category=category, overwrites=_text_overwrites())
             l.text_id = text.id
-            vote_ch = await guild.create_text_channel("vote", category=category)
+            vote_ch = await guild.create_text_channel("vote", category=category, overwrites=_text_overwrites())
             l.vote_id = vote_ch.id
             move_tasks = []
             for m in l.team1:
@@ -1601,14 +1608,12 @@ async def cmd_setrankchannel(interaction: discord.Interaction, channel: discord.
         cfg["rank_channel_id"] = channel.id
         cfg["apostado_channel_id"] = channel.id
         msg = None
-        try:
-            async for m in channel.history(limit=50):
-                react = discord.utils.get(m.reactions, emoji="🏆")
-                if react:
-                    msg = m
-                    break
-        except:
-            pass
+        configured_mid = _guild_setting(guild.id, "rank_message_id") or rank_message_id
+        if configured_mid:
+            msg = await safe_fetch_message(channel, configured_mid)
+            if not msg:
+                log.info("Previous rank message %s no longer exists in #%s", configured_mid, channel.name)
+        _last_auto_rank_msg[guild.id] = time.monotonic()
         if msg:
             _set_guild_setting(guild.id, rank_message_id=msg.id)
             rank_message_id = msg.id
@@ -2020,6 +2025,9 @@ async def ensure_rank_role(guild):
         return None
 
 
+_last_auto_rank_msg: dict[int, float] = {}
+RANK_MSG_MIN_RESEND_INTERVAL = 6 * 3600
+
 async def ensure_get_rank_channel(guild):
     global rank_message_id, rank_channel_id
     try:
@@ -2036,13 +2044,18 @@ async def ensure_get_rank_channel(guild):
         mid = gs.get("rank_message_id") or rank_message_id
         if mid:
             try:
-                msg = await target.fetch_message(mid)
+                await target.fetch_message(mid)
                 return target
-            except:
-                pass
+            except Exception as e:
+                log.info("Saved rank message %s unavailable in #%s (%s): %r", mid, getattr(target, "name", "?"), guild.name, e)
+        last = _last_auto_rank_msg.get(guild.id, 0.0)
+        if time.monotonic() - last < RANK_MSG_MIN_RESEND_INTERVAL:
+            log.info("Skipping rank-message recreation in %s (auto-resend cooldown)", guild.name)
+            return target
         try:
             msg = await target.send("React with 🏆 to get the **APOSTADO PLAYER** role and access to the bot!\n\nYour nickname will also be tracked with a rank based on points.")
             await msg.add_reaction("🏆")
+            _last_auto_rank_msg[guild.id] = time.monotonic()
             _set_guild_setting(guild.id, rank_message_id=msg.id, rank_channel_id=target.id)
             rank_message_id = msg.id
             rank_channel_id = target.id
