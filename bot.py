@@ -58,7 +58,7 @@ COOLDOWN_ADMIN = 1
 COOLDOWN_LOBBIES = 2
 
 # ── Score cache ───────────────────────────────────────────────────────
-_score_cache = None  # in-memory source of truth (lazily loaded once)
+_score_cache = None  
 
 def get_scores_cached():
     return load_scores()
@@ -585,7 +585,7 @@ class MatchVote:
     def __init__(self, lobby, question, options, voters):
         self.lobby = lobby
         self.question = question
-        self.options = options          # list of (value, label)
+        self.options = options          
         self.voters = set(voters)
         self.t1_voters = {m.id for m in (lobby.team1 if lobby else [])} & self.voters
         self.t2_voters = {m.id for m in (lobby.team2 if lobby else [])} & self.voters
@@ -2495,7 +2495,6 @@ async def on_message(message):
         await bot.process_commands(message)
 
 
-# ── License HTTP API ──────────────────────────────────────────────────
 LICENSE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 LICENSE_SECRET  = "M0nSt3rL1c3ns3K3yG3n2024!@#$%"
 
@@ -2575,7 +2574,7 @@ def run_http_server():
                 time.sleep(3)
     log.error("HTTP server could not start after 5 attempts")
 
-# ── License Slash Commands ────────────────────────────────────────────
+
 @bot.tree.command(name="addadmin", description="[Admin] Grant bot admin access to a user")
 async def cmd_addadmin(interaction: discord.Interaction, member: discord.Member):
     if not is_admin_user(interaction):
